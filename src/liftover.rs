@@ -21,7 +21,9 @@ pub fn trim_paf_rec_to_rgn(rgn: &bed::Region, paf: &PafRecord) -> Option<PafReco
 
     // check if we can return right away
     if paf.t_st > rgn.st && paf.t_en < rgn.en {
-        return Some(paf.clone());
+        let mut tmp_rec = paf.clone();
+        tmp_rec.id = rgn.id.clone();
+        return Some(tmp_rec);
     }
 
     // index at the start of trimmed alignment
