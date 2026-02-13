@@ -271,9 +271,8 @@ pub fn parse_cli() {
         Some(Commands::BreakPaf { paf, max_size }) => {
             // read in the file
             let paf = paf::Paf::from_file(paf);
-            for mut paf in paf.records {
-                paf.aligned_pairs();
-                let pafs = liftover::break_paf_on_indels(&paf, *max_size);
+            for paf_rec in &paf.records {
+                let pafs = liftover::break_paf_on_indels(paf_rec, *max_size);
                 for trimed_paf in pafs {
                     println!("{}", trimed_paf);
                 }

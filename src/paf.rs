@@ -3,7 +3,7 @@ use super::getfasta;
 use super::myio;
 use super::trim_overlap::trim_overlapping_pafs;
 use bio::alphabets::dna::revcomp;
-use core::{fmt, panic};
+use core::fmt;
 use itertools::Itertools;
 use lazy_static::lazy_static;
 use natord;
@@ -270,8 +270,6 @@ impl Paf {
             // if we have not seen the q_name before it cannot be
             // in conflict with previous trimming steps
             if !q_seen.contains(&q_name) {
-                left.aligned_pairs();
-                right.aligned_pairs();
                 trim_overlapping_pafs(&mut left, &mut right, match_score, diff_score, indel_score);
                 log::trace!("{}", left);
                 log::trace!("{}", right);
@@ -343,6 +341,55 @@ impl Paf {
     }
 }
 
+/// A single cs-tag operation, stored in 1:1 correspondence with CIGAR ops.
+#[derive(Debug, Clone)]
+pub enum CsOp {
+    /// `:N` — N matching bases (compact form, no sequence)
+    Matches(u32),
+    /// `=ACGT` — matching bases with explicit sequence
+    MatchSeq(Vec<u8>),
+    /// `*xy` — single-base mismatch (ref base, query base)
+    Mismatch(u8, u8),
+    /// `+acgt` — insertion of query bases
+    Insertion(Vec<u8>),
+    /// `-acgt` — deletion of reference bases
+    Deletion(Vec<u8>),
+}
+
+impl CsOp {
+    /// Trim this op to keep only bases at [skip..skip+keep).
+    pub fn trim(&self, skip: u32, keep: u32) -> CsOp {
+        match self {
+            CsOp::Matches(_) => CsOp::Matches(keep),
+            CsOp::MatchSeq(s) => {
+                CsOp::MatchSeq(s[skip as usize..(skip + keep) as usize].to_vec())
+            }
+            CsOp::Mismatch(r, q) => {
+                debug_assert!(skip == 0 && keep == 1);
+                CsOp::Mismatch(*r, *q)
+            }
+            CsOp::Insertion(s) => {
+                CsOp::Insertion(s[skip as usize..(skip + keep) as usize].to_vec())
+            }
+            CsOp::Deletion(s) => {
+                CsOp::Deletion(s[skip as usize..(skip + keep) as usize].to_vec())
+            }
+        }
+    }
+}
+
+impl fmt::Display for CsOp {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            CsOp::Matches(n) => write!(f, ":{}", n),
+            CsOp::MatchSeq(s) => write!(f, "={}", std::str::from_utf8(s).unwrap()),
+            CsOp::Mismatch(r, q) => write!(f, "*{}{}", *r as char, *q as char),
+            CsOp::Insertion(s) => write!(f, "+{}", std::str::from_utf8(s).unwrap()),
+            CsOp::Deletion(s) => write!(f, "-{}", std::str::from_utf8(s).unwrap()),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PafRecord {
     pub q_name: String,
@@ -358,10 +405,10 @@ pub struct PafRecord {
     pub aln_len: u64,
     pub mapq: u64,
     pub cigar: CigarString,
+    /// Parsed cs-tag ops, in 1:1 correspondence with `cigar`.
+    /// `None` when input was CIGAR (cg tag); `Some` when input was cs tag.
+    pub cs_ops: Option<Vec<CsOp>>,
     pub tags: String,
-    pub tpos_aln: Vec<u64>,
-    pub qpos_aln: Vec<u64>,
-    pub long_cigar: CigarString,
     pub id: String,
     pub order: u64,
     pub contained: bool,
@@ -383,20 +430,23 @@ impl PafRecord {
         let mut tags = "".to_string();
         // find the cigar if it is there
         let mut cigar = CigarString(vec![]);
+        let mut cs_ops: Option<Vec<CsOp>> = None;
         for token in t.iter().skip(12) {
             assert!(PAF_TAG.is_match(token));
             let caps = PAF_TAG.captures(token).unwrap();
             let tag = &caps[1];
             let value = &caps[3];
-            // TODO fix cs string parsing when both cigar and cs are there. breaks on real files
-            //if tag == "cs" {
-            //    cigar = cs_to_cigar(value)?;
-            //} else
-            if tag == "cg" && cigar.len() == 0 {
+            if tag == "cg" {
+                // cg tag takes precedence — parse CIGAR, discard any cs
                 log::trace!("parsing cigar of length: {}", value.len());
-                //cigar = cigar_from_str(value)?;
                 cigar =
                     CigarString::try_from(value.as_bytes()).expect("Unable to parse cigar string.");
+                cs_ops = None;
+            } else if tag == "cs" && cigar.is_empty() {
+                // Only use cs tag when no cg tag is present
+                let parsed = parse_cs_string(value)?;
+                cigar = parsed.0;
+                cs_ops = Some(parsed.1);
             } else {
                 tags.push('\t');
                 tags.push_str(token);
@@ -418,10 +468,8 @@ impl PafRecord {
             aln_len: t[10].parse::<u64>().map_err(|_| Error::ParsePafColumn {})?,
             mapq: t[11].parse::<u64>().map_err(|_| Error::ParsePafColumn {})?,
             cigar,
+            cs_ops,
             tags,
-            tpos_aln: Vec::new(),
-            qpos_aln: Vec::new(),
-            long_cigar: CigarString(Vec::new()),
             id: "".to_string(),
             order: 0,
             contained: false,
@@ -445,10 +493,8 @@ impl PafRecord {
             aln_len: self.aln_len,
             mapq: self.mapq,
             cigar: CigarString(Vec::new()),
+            cs_ops: None,
             tags: self.tags.clone(),
-            tpos_aln: Vec::new(),
-            qpos_aln: Vec::new(),
-            long_cigar: CigarString(Vec::new()),
             id: self.id.clone(),
             order: self.order,
             contained: self.contained,
@@ -483,120 +529,6 @@ impl PafRecord {
             en: self.t_en,
             ..Default::default()
         }
-    }
-
-    // make a long cigar from the existing cigar
-    pub fn make_long_cigar(&mut self) {
-        let mut long_cigar = Vec::new();
-        for opt in self.cigar.into_iter() {
-            let opt_len = opt.len() as u64;
-            for _i in 0..opt_len {
-                long_cigar.push(update_cigar_opt_len(opt, 1));
-            }
-        }
-        self.long_cigar = CigarString(long_cigar);
-    }
-
-    /// This function adds matching alignment positions and cigar operations
-    pub fn aligned_pairs(&mut self) {
-        // aligned pairs is messed up when there are leading or trailing indels
-        self.remove_trailing_indels();
-
-        let mut t_pos = self.t_st as i64 - 1;
-        let mut q_pos = self.q_st as i64 - 1;
-
-        let mut long_cigar = Vec::new();
-        self.tpos_aln = Vec::new();
-        self.qpos_aln = Vec::new();
-
-        if self.strand == '-' {
-            q_pos = self.q_en as i64; // ends are not inclusive
-        }
-
-        for opt in self.cigar.into_iter() {
-            let moves_t = consumes_reference(opt);
-            let moves_q = consumes_query(opt);
-            let opt_len = opt.len() as u64;
-            // increment the ref and or query
-            for _i in 0..opt_len {
-                long_cigar.push(update_cigar_opt_len(opt, 1));
-                if moves_t {
-                    t_pos += 1;
-                }
-                if moves_q && self.strand == '+' {
-                    q_pos += 1;
-                }
-                if moves_q && self.strand == '-' {
-                    q_pos -= 1;
-                }
-                self.tpos_aln.push(t_pos as u64);
-                self.qpos_aln.push(q_pos as u64);
-            }
-        }
-
-        self.long_cigar = CigarString(long_cigar);
-    }
-
-    /// Does a binary search on the alignment to find its index in the alignment
-    pub fn tpos_to_idx(&self, tpos: u64) -> Result<usize, usize> {
-        let idx = self.tpos_aln.binary_search(&tpos)?;
-        Ok(idx)
-    }
-
-    /// force the tpos index to be at a match to the right (or left)
-    pub fn tpos_to_idx_match(&self, qpos: u64, search_right: bool) -> Result<usize, usize> {
-        let mut idx = self.tpos_to_idx(qpos)?;
-        let max_idx = self.long_cigar.len();
-        // find the closes actual matching base
-        if search_right {
-            while idx < max_idx && !matches!(self.long_cigar[idx], Match(_) | Diff(_) | Equal(_)) {
-                idx += 1;
-            }
-        } else {
-            while idx > 0 && !matches!(self.long_cigar[idx], Match(_) | Diff(_) | Equal(_)) {
-                idx -= 1;
-            }
-        }
-        Ok(idx)
-    }
-
-    /// Does a binary search on the query sequence to find its index in the alignment
-    pub fn qpos_to_idx(&self, qpos: u64) -> Result<usize, usize> {
-        let idx = if self.strand == '-' {
-            // can be reverse sorted if the strand is "-" so need to mod bin search
-            self.qpos_aln
-                .binary_search_by(|probe| probe.cmp(&qpos).reverse())?
-        } else {
-            self.qpos_aln.binary_search(&qpos)?
-        };
-        Ok(idx)
-    }
-
-    /// force the qpos index to be at a match to the right (or left)
-    pub fn qpos_to_idx_match(&self, qpos: u64, search_right: bool) -> Result<usize, usize> {
-        let mut idx = self.qpos_to_idx(qpos)?;
-        let max_idx = self.long_cigar.len();
-        // find the closes actual matching base
-        if (search_right && self.strand == '+') || (!search_right && self.strand == '-') {
-            while idx < max_idx && !matches!(self.long_cigar[idx], Match(_) | Diff(_) | Equal(_)) {
-                idx += 1;
-            }
-        } else {
-            while idx > 0 && !matches!(self.long_cigar[idx], Match(_) | Diff(_) | Equal(_)) {
-                idx -= 1;
-            }
-        }
-        Ok(idx)
-    }
-
-    /// subset cigar on coordinates
-    pub fn subset_cigar(&self, start_idx: usize, end_idx: usize) -> CigarString {
-        // update the cigar string
-        let mut new_cigar = vec![];
-        for opt in &self.long_cigar.0[start_idx..end_idx + 1] {
-            new_cigar.push(*opt);
-        }
-        CigarString(new_cigar)
     }
 
     pub fn collapse_long_cigar(cigar: &CigarString) -> CigarString {
@@ -752,9 +684,13 @@ impl PafRecord {
             );
         }
 
-        // update the cigar string
+        // update the cigar string (and cs_ops if present)
         self.cigar = CigarString(self.cigar.0[remove_st_opts..].to_vec());
         self.cigar.0.truncate(self.cigar.len() - remove_en_opts);
+        if let Some(ref mut cs) = self.cs_ops {
+            *cs = cs[remove_st_opts..].to_vec();
+            cs.truncate(cs.len() - remove_en_opts);
+        }
 
         // update the target coordinates
         self.t_st += remove_st_t as u64;
@@ -769,7 +705,7 @@ impl PafRecord {
         self.q_en -= remove_en_q as u64;
 
         // check we removed the indels
-        if self.cigar.len() > 0 {
+        if !self.cigar.is_empty() {
             let st_opt = *self.cigar.first().unwrap();
             let en_opt = *self.cigar.last().unwrap();
             if matches!(st_opt, Ins(_) | Del(_)) || matches!(en_opt, Ins(_) | Del(_)) {
@@ -782,41 +718,173 @@ impl PafRecord {
         self.check_integrity().unwrap();
     }
 
+    /// Truncate this record to keep only the portion within [new_q_st, new_q_en)
+    /// in query coordinates. Walks compressed CIGAR ops directly — O(n_cigar_ops).
     pub fn truncate_record_by_query(&mut self, new_q_st: u64, new_q_en: u64) {
         // checks
         assert!(new_q_st >= self.q_st, "New start is less than old start.");
         assert!(new_q_en <= self.q_en, "New end is greater than old end.");
 
-        // get alignment positions
-        self.make_long_cigar(); // needed for indel check
-        let mut aln_st = self.qpos_to_idx_match(new_q_st, true).unwrap();
-        let mut aln_en = self.qpos_to_idx_match(new_q_en - 1, false).unwrap();
-
-        let new_new_q_st = self.qpos_aln[aln_st];
-        let new_new_q_en = self.qpos_aln[aln_en] + 1; // ends are not inclusive
-
-        // if rc must swap
-        if aln_st > aln_en {
-            std::mem::swap(&mut aln_st, &mut aln_en);
+        if new_q_st == self.q_st && new_q_en == self.q_en {
+            return;
         }
-        let new_t_st = self.tpos_aln[aln_st];
-        let new_t_en = self.tpos_aln[aln_en] + 1; // ends are not inclusive
 
-        // update the cigar string
-        // update alignment positions
-        self.long_cigar = self.subset_cigar(aln_st, aln_en);
-        self.cigar = PafRecord::collapse_long_cigar(&self.long_cigar);
+        let cs_vec = self.cs_ops.take(); // take ownership for parallel processing
+        let mut new_cs_ops: Option<Vec<CsOp>> = cs_vec.as_ref().map(|_| Vec::new());
 
-        // update the target coordinates
-        self.t_st = new_t_st;
-        self.t_en = new_t_en;
+        let mut q_pos = if self.strand == '+' { self.q_st } else { self.q_en };
+        let mut new_cigar_ops: Vec<Cigar> = Vec::new();
+        let mut t_before: u64 = 0;
+        let mut q_consumed_before: u64 = 0;
+        let mut q_consumed_in: u64 = 0;
+        let mut started = false;
+        let mut finished = false;
 
-        // fix the query positions that need to be
-        self.q_st = new_new_q_st;
-        self.q_en = new_new_q_en;
+        for (ci, op) in self.cigar.into_iter().enumerate() {
+            if finished {
+                break;
+            }
+            let op_len = op.len() as u64;
+            let moves_t = consumes_reference(op);
+            let moves_q = consumes_query(op);
 
-        // should not happen but just in case
-        self.remove_trailing_indels();
+            if !moves_q {
+                // Deletion or ref skip — doesn't advance query
+                if started {
+                    new_cigar_ops.push(*op);
+                    if let (Some(ref mut ncs), Some(ref cs)) = (&mut new_cs_ops, &cs_vec) {
+                        ncs.push(cs[ci].clone());
+                    }
+                } else if moves_t {
+                    t_before += op_len;
+                }
+                continue;
+            }
+
+            // Query-consuming op: compute absolute query range [q_lo, q_hi)
+            let (q_lo, q_hi) = if self.strand == '+' {
+                let lo = q_pos;
+                q_pos += op_len;
+                (lo, q_pos)
+            } else {
+                q_pos -= op_len;
+                (q_pos, q_pos + op_len)
+            };
+
+            // Check overlap with [new_q_st, new_q_en)
+            let overlap_start = std::cmp::max(q_lo, new_q_st);
+            let overlap_end = std::cmp::min(q_hi, new_q_en);
+            if overlap_start >= overlap_end {
+                // No overlap
+                if !started {
+                    if moves_t {
+                        t_before += op_len;
+                    }
+                    q_consumed_before += op_len;
+                }
+                continue;
+            }
+
+            // Bases to skip at the CIGAR-start side of this op
+            let skip_before_cigar = if self.strand == '+' {
+                overlap_start - q_lo
+            } else {
+                q_hi - overlap_end
+            };
+            let keep = overlap_end - overlap_start;
+
+            if !started {
+                started = true;
+                if moves_t {
+                    t_before += skip_before_cigar;
+                }
+                q_consumed_before += skip_before_cigar;
+            }
+
+            q_consumed_in += keep;
+            new_cigar_ops.push(update_cigar_opt_len(op, keep as u32));
+            if let (Some(ref mut ncs), Some(ref cs)) = (&mut new_cs_ops, &cs_vec) {
+                ncs.push(cs[ci].trim(skip_before_cigar as u32, keep as u32));
+            }
+
+            // Check if we've reached the far boundary
+            if (self.strand == '+' && overlap_end >= new_q_en)
+                || (self.strand == '-' && overlap_start <= new_q_st)
+            {
+                finished = true;
+            }
+        }
+
+        if new_cigar_ops.is_empty() {
+            self.cs_ops = new_cs_ops;
+            return;
+        }
+
+        // Remove leading indels and adjust coordinates
+        let mut lead_t: u64 = 0;
+        let mut lead_q: u64 = 0;
+        while !new_cigar_ops.is_empty() {
+            let first = new_cigar_ops[0];
+            if matches!(first, Match(_) | Equal(_) | Diff(_)) {
+                break;
+            }
+            if consumes_reference(&first) {
+                lead_t += first.len() as u64;
+            }
+            if consumes_query(&first) {
+                lead_q += first.len() as u64;
+            }
+            new_cigar_ops.remove(0);
+            if let Some(ref mut ncs) = new_cs_ops {
+                ncs.remove(0);
+            }
+        }
+        t_before += lead_t;
+        q_consumed_before += lead_q;
+        q_consumed_in -= lead_q;
+
+        // Remove trailing indels
+        let mut trail_q: u64 = 0;
+        while !new_cigar_ops.is_empty() {
+            let last = *new_cigar_ops.last().unwrap();
+            if matches!(last, Match(_) | Equal(_) | Diff(_)) {
+                break;
+            }
+            if consumes_query(&last) {
+                trail_q += last.len() as u64;
+            }
+            new_cigar_ops.pop();
+            if let Some(ref mut ncs) = new_cs_ops {
+                ncs.pop();
+            }
+        }
+        q_consumed_in -= trail_q;
+
+        if new_cigar_ops.is_empty() {
+            self.cs_ops = new_cs_ops;
+            return;
+        }
+
+        // Compute new target coordinates
+        self.t_st += t_before;
+        let t_bases: u64 = new_cigar_ops
+            .iter()
+            .filter(|op| consumes_reference(op))
+            .map(|op| op.len() as u64)
+            .sum();
+        self.t_en = self.t_st + t_bases;
+
+        // Set query coordinates
+        if self.strand == '+' {
+            self.q_st += q_consumed_before;
+            self.q_en = self.q_st + q_consumed_in;
+        } else {
+            self.q_en -= q_consumed_before;
+            self.q_st = self.q_en - q_consumed_in;
+        }
+
+        self.cigar = CigarString(new_cigar_ops);
+        self.cs_ops = new_cs_ops;
 
         // check integrity and update aln_len and nmatch
         self.check_integrity().unwrap();
@@ -939,7 +1007,15 @@ impl fmt::Display for PafRecord {
             self.mapq,
             self.id,
             self.cigar,
-        )
+        )?;
+        // Also output cs tag if present
+        if let Some(ref cs_ops) = self.cs_ops {
+            write!(f, "\tcs:Z:")?;
+            for op in cs_ops {
+                write!(f, "{}", op)?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1078,27 +1154,123 @@ pub fn paf_swap_query_and_target(paf: &PafRecord) -> PafRecord {
     flipped.q_st = paf.t_st;
     flipped.q_en = paf.t_en;
 
-    // flip the index
-    std::mem::swap(&mut flipped.qpos_aln, &mut flipped.tpos_aln);
-
     // flip the cigar
     flipped.cigar = cigar_swap_target_query(&paf.cigar, paf.strand);
-    flipped.long_cigar = cigar_swap_target_query(&paf.long_cigar, paf.strand);
 
-    // update the alignment positions
-    if !flipped.tpos_aln.is_empty() {
-        flipped.aligned_pairs();
-    }
+    // flip cs_ops: swap Insertion ↔ Deletion
+    flipped.cs_ops = paf.cs_ops.as_ref().map(|ops| {
+        let mut new_ops: Vec<CsOp> = ops
+            .iter()
+            .map(|op| match op {
+                CsOp::Insertion(s) => CsOp::Deletion(s.clone()),
+                CsOp::Deletion(s) => CsOp::Insertion(s.clone()),
+                other => other.clone(),
+            })
+            .collect();
+        if paf.strand == '-' {
+            new_ops.reverse();
+        }
+        new_ops
+    });
 
     flipped
 }
 
 pub fn make_fake_paf_rec() -> PafRecord {
-    let mut rtn = PafRecord::new("Q 10 2 10 - T 20 12 20 3 9 60 cg:Z:4M1I1D3=").unwrap();
-    rtn.aligned_pairs();
-    rtn
+    PafRecord::new("Q 10 2 10 - T 20 12 20 3 9 60 cg:Z:4M1I1D3=").unwrap()
 }
 
+/// Parse a cs-tag string into both a CigarString and a Vec<CsOp>.
+/// Supports both long form (`=ACGT`, `*at`) and short form (`:10`).
+///
+/// # Example
+/// ```
+/// use rust_htslib::bam::record::Cigar::*;
+/// use rustybam::paf;
+/// let (cigar, cs_ops) = paf::parse_cs_string(":10=ACGTN+acgtn-acgtn*at=A").unwrap();
+/// assert_eq!(cigar[0], Equal(10));
+/// assert_eq!(cigar[1], Equal(5));
+/// assert_eq!(cigar[2], Ins(5));
+/// assert_eq!(cigar[3], Del(5));
+/// assert_eq!(cigar[4], Diff(1));
+/// assert_eq!(cigar[5], Equal(1));
+/// assert_eq!(cs_ops.len(), cigar.len());
+/// ```
+pub fn parse_cs_string(cs: &str) -> PafResult<(CigarString, Vec<CsOp>)> {
+    let bytes = cs.as_bytes();
+    let length = bytes.len();
+    let mut i = 0;
+    let mut cigar = vec![];
+    let mut cs_ops = vec![];
+    while i < length {
+        let cs_opt = bytes[i];
+        i += 1; // past the operator
+        match cs_opt {
+            b'=' => {
+                let start = i;
+                while i < length && matches!(bytes[i], b'A' | b'C' | b'G' | b'T' | b'N') {
+                    i += 1;
+                }
+                let seq = bytes[start..i].to_vec();
+                let l = seq.len() as u32;
+                cigar.push(Cigar::Equal(l));
+                cs_ops.push(CsOp::MatchSeq(seq));
+            }
+            b':' => {
+                let start = i;
+                while i < length && bytes[i].is_ascii_digit() {
+                    i += 1;
+                }
+                let l = u32::from_str(&cs[start..i]).map_err(|_| Error::ParseIntError {
+                    msg: "Expected integer in cs :N operator".to_string(),
+                })?;
+                cigar.push(Cigar::Equal(l));
+                cs_ops.push(CsOp::Matches(l));
+            }
+            b'*' => {
+                let ref_base = bytes[i];
+                let query_base = bytes[i + 1];
+                i += 2;
+                cigar.push(Cigar::Diff(1));
+                cs_ops.push(CsOp::Mismatch(ref_base, query_base));
+            }
+            b'+' => {
+                let start = i;
+                while i < length && bytes[i].is_ascii_lowercase() {
+                    i += 1;
+                }
+                let seq = bytes[start..i].to_vec();
+                let l = seq.len() as u32;
+                cigar.push(Cigar::Ins(l));
+                cs_ops.push(CsOp::Insertion(seq));
+            }
+            b'-' => {
+                let start = i;
+                while i < length && bytes[i].is_ascii_lowercase() {
+                    i += 1;
+                }
+                let seq = bytes[start..i].to_vec();
+                let l = seq.len() as u32;
+                cigar.push(Cigar::Del(l));
+                cs_ops.push(CsOp::Deletion(seq));
+            }
+            b'~' => {
+                return Err(Error::PafParseCS {
+                    msg: "Splice operations not yet supported.".to_string(),
+                });
+            }
+            _ => {
+                return Err(Error::PafParseCS {
+                    msg: format!("Unexpected operator in the cs string: {}", cs_opt as char),
+                });
+            }
+        }
+    }
+    Ok((CigarString(cigar), cs_ops))
+}
+
+/// Parse a cs-tag string into a CigarString (convenience wrapper).
+///
 /// # Example
 /// ```
 /// use rust_htslib::bam::record::Cigar::*;
@@ -1112,68 +1284,6 @@ pub fn make_fake_paf_rec() -> PafRecord {
 /// assert_eq!(cigar[5], Equal(1));
 /// ```
 pub fn cs_to_cigar(cs: &str) -> PafResult<CigarString> {
-    let bytes = cs.as_bytes();
-    let length = bytes.len();
-    let mut i = 0;
-    let mut cigar = vec![];
-    while i < length {
-        let cs_opt = bytes[i];
-        let mut l = 0;
-        // get past the opt and to the information
-        i += 1;
-        let opt = match cs_opt {
-            b'=' => {
-                while let b'A' | b'C' | b'G' | b'T' | b'N' = bytes[i] {
-                    i += 1;
-                    l += 1;
-                    if i == length {
-                        break;
-                    }
-                }
-                Cigar::Equal(l)
-            }
-            b':' => {
-                let mut j = i;
-                while j < length && bytes[j].is_ascii_digit() {
-                    j += 1;
-                }
-                let str = cs[i..j].to_string();
-                l = u32::from_str(&cs[i..j]).map_err(|_| Error::ParseIntError {
-                    msg: format!("Expected integer, got {}", str),
-                })?;
-                i += j - 1;
-                Cigar::Equal(l)
-            }
-            b'*' => {
-                i += 2;
-                Cigar::Diff(1)
-            }
-            b'+' | b'-' => {
-                while let b'a' | b'c' | b'g' | b't' | b'n' = bytes[i] {
-                    i += 1;
-                    l += 1;
-                    if i == length {
-                        break;
-                    }
-                }
-                match cs_opt {
-                    b'+' => Cigar::Ins(l),
-                    b'-' => Cigar::Del(l),
-                    _ => panic!("should be impossible + or - needed"),
-                }
-            }
-            b'~' => {
-                return Err(Error::PafParseCS {
-                    msg: "Splice operations not yet supported.".to_string(),
-                });
-            }
-            _ => {
-                return Err(Error::PafParseCS {
-                    msg: format!("Unexpected operator in the cs string: {}", cs_opt as char),
-                });
-            }
-        };
-        cigar.push(opt);
-    }
-    Ok(CigarString(cigar))
+    let (cigar, _) = parse_cs_string(cs)?;
+    Ok(cigar)
 }

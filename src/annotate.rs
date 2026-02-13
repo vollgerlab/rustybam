@@ -3,11 +3,11 @@ use bio::io::*;
 use itertools::Itertools;
 
 pub trait IntervalTreeExt<N: Ord + Clone, D> {
-    fn find_bed_overlaps(&self, rec: &bed::Record) -> Vec<Entry<u64, bed::Record>>;
+    fn find_bed_overlaps(&self, rec: &bed::Record) -> Vec<Entry<'_, u64, bed::Record>>;
 }
 
 impl IntervalTreeExt<u64, &bed::Record> for IntervalTree<u64, bed::Record> {
-    fn find_bed_overlaps(&self, rec: &bed::Record) -> Vec<Entry<u64, bed::Record>> {
+    fn find_bed_overlaps(&self, rec: &bed::Record) -> Vec<Entry<'_, u64, bed::Record>> {
         self.find(rec.start()..rec.end())
             .filter(|entry| entry.data().chrom() == rec.chrom())
             .collect_vec()

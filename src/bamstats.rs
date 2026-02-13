@@ -126,8 +126,7 @@ pub fn add_stats_from_cigar(cigar: &CigarStringView, stats: &mut Stats, md: Opti
         }
     }
     // try the MD tag if there are no matches
-    if stats.equal == 0 && stats.matches > 0 && md.is_some() {
-        let md = md.unwrap();
+    if let Some(md) = md.filter(|_| stats.equal == 0 && stats.matches > 0) {
         let (m_count, mm_count, _i_c, _i_bp) = parse_md_for_stats(md);
         assert_eq!(m_count + mm_count, stats.diff);
         stats.equal = m_count;

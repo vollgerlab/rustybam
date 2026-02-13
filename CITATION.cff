@@ -1,0 +1,25 @@
+cff-version: 1.2.0
+message: "If you use rustybam, please cite it using the metadata from this file."
+type: software
+title: "rustybam"
+abstract: "A bioinformatics toolkit in Rust for CIGAR-aware manipulation of PAF and BAM alignments"
+version: "0.1.34"
+authors:
+  - family-names: "Vollger"
+    given-names: "Mitchell R."
+    orcid: "https://orcid.org/0000-0002-8651-1615"
+repository-code: "https://github.com/vollgerlab/rustybam"
+url: "https://vollgerlab.com/rustybam/"
+license: MIT
+keywords:
+  - bioinformatics
+  - alignment
+  - PAF
+  - BAM
+  - CIGAR
+  - liftover
+  - genome comparison
+identifiers:
+  - type: doi
+    value: "10.5281/zenodo.4654875"
+    description: "Zenodo archive"

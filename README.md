@@ -1,8 +1,8 @@
 # rustybam
 
-[![Actions Status](https://github.com/mrvollger/rustybam/workflows/Test%20and%20Build/badge.svg)](https://github.com/mrvollger/rustybam/actions)
-[![Actions Status](https://github.com/mrvollger/rustybam/workflows/Formatting/badge.svg)](https://github.com/mrvollger/rustybam/actions)
-[![Actions Status](https://github.com/mrvollger/rustybam/workflows/Clippy/badge.svg)](https://github.com/mrvollger/rustybam/actions)
+[![Actions Status](https://github.com/vollgerlab/rustybam/workflows/Test%20and%20Build/badge.svg)](https://github.com/vollgerlab/rustybam/actions)
+[![Actions Status](https://github.com/vollgerlab/rustybam/workflows/Formatting/badge.svg)](https://github.com/vollgerlab/rustybam/actions)
+[![Actions Status](https://github.com/vollgerlab/rustybam/workflows/Clippy/badge.svg)](https://github.com/vollgerlab/rustybam/actions)
 
 [![Conda (channel only)](https://img.shields.io/conda/vn/bioconda/rustybam?color=green)](https://anaconda.org/bioconda/rustybam)
 [![Downloads](https://img.shields.io/conda/dn/bioconda/rustybam?color=green)](https://anaconda.org/bioconda/rustybam)
@@ -69,6 +69,27 @@ SUBCOMMANDS:
     help           Print this message or the help of the given subcommand(s)
 ```
 
+### Subcommand quick reference
+
+| Subcommand | Description | Aliases |
+|---|---|---|
+| `stats` | CIGAR-based alignment identity statistics (BAM/PAF) | |
+| `trim-paf` | Resolve overlapping query alignments via DP | `trim`, `tp` |
+| `break-paf` | Split alignments at large indels | `breakpaf`, `bp` |
+| `orient` | Orient contigs to forward direction | |
+| `liftover` | CIGAR-aware coordinate liftover via PAF | `lo` |
+| `filter` | Multi-criteria PAF filtering | |
+| `invert` | Swap target/query with updated CIGAR | |
+| `get-fasta` | Extract sequences (supports bgzip) | `getfasta`, `gf` |
+| `nucfreq` | Per-position nucleotide frequencies | |
+| `paf-to-sam` | Convert PAF to SAM format | `paftosam`, `p2s` |
+| `bed-length` | Count bases in BED files | `bedlen`, `bl` |
+| `fastx-split` | Distribute FASTX across files | `fxs` |
+| `repeat` | Longest exact repeat at each position | |
+| `suns` | Shortest unique subsequence intervals | |
+| `add-rg` | Add read groups from source BAM | |
+| `seq-stats` | N50, quantiles, summary statistics | |
+
 ## Install
 
 ### conda
@@ -83,14 +104,14 @@ mamba install -c bioconda rustybam
 cargo install rustybam
 ```
 
-### Pre-complied binaries
+### Pre-compiled binaries
 
-Download from [releases](https://github.com/mrvollger/rustybam/releases) (may be slower than locally complied versions).
+Download from [releases](https://github.com/vollgerlab/rustybam/releases) (may be slower than locally compiled versions).
 
 ### Source
 
 ```shell
-git clone https://github.com/mrvollger/rustybam.git
+git clone https://github.com/vollgerlab/rustybam.git
 cd rustybam
 cargo build --release
 ```
@@ -144,7 +165,7 @@ rustybam liftover \
 
 > Okay, but Evan asked for an "align slider" so I need to realign in chunks.
 
-No need, just make your `bed` query to `rustybam liftoff` a set of sliding windows
+No need, just make your `bed` query to `rustybam liftover` a set of sliding windows
 and it will do the rest.
 
 ```shell
@@ -171,7 +192,7 @@ rustybam breakpaf --max-size 1000 input.paf \
 > Yeah but how do I visualize the data?
 
 Try out
-[SafFire](https://mrvollger.github.io/SafFire/)!
+[SafFire](https://vollgerlab.com/SafFire/)!
 
 ### Align once
 
@@ -210,16 +231,16 @@ samtools faidx {seq.fa(.gz)}
 rb get-fasta --name --strand --bed {regions.of.interest.bed} --fasta {seq.fa(.gz)}
 ```
 
+## Known limitations
+
+- `paf-to-sam`: All alignments are marked as primary in the output SAM.
+- `stats --paf`: Requires PAF files generated with minimap2 `-c --eqx` flags.
+- `trim-paf`: Loads the full PAF file into memory; for very large whole-genome alignments, consider splitting by chromosome first.
+- CIGAR operations use the `=/X` extended format; the `cs` tag is not yet supported (see [#3](https://github.com/vollgerlab/rustybam/issues/3)).
+
 ## TODO
 
-- [x] Add a `bedtools getfasta` like operation that actually works with bgzipped input.
-  - [ ] implement bed12/split
-- [ ] Allow sam or paf for operations:
-  - [x] make a sam header from a PAF file
-  - [x] convert sam record to paf record
-  - [x] convert paf record to sam record
-  - [ ] make tools seemlessly work with sam and paf
-- [ ] Add `D4` for Nucfreq.
-- [ ] Finish implementing `suns`.
+- [ ] Add `cs` tag support
+- [ ] Streaming `trim-paf` to reduce memory usage
 - [ ] Allow multiple input files in `bed-length`
-- [ ] Start keeping a changelog
+- [ ] Add `D4` support for `nucfreq`

@@ -4,12 +4,12 @@ build = "build.rs"                                      # not yet stable enough
 categories = ["command-line-utilities"]
 description = "bioinformatics toolkit in rust"
 edition = "2021"
-homepage = "https://mrvollger.github.io/rustybam/"
+homepage = "https://vollgerlab.com/rustybam/"
 keywords = ["cli", "bam", "paf", "liftover"]
 license = "MIT"
 name = "rustybam"
 readme = "README.md"
-repository = "https://github.com/mrvollger/rustybam"
+repository = "https://github.com/vollgerlab/rustybam"
 version = "0.1.34"
 
 [[bin]]
