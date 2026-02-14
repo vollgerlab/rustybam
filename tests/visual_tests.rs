@@ -1123,3 +1123,157 @@ fn cs_break_preserves_cs_ops() {
     assert_eq!(cs2, ":3");
     assert_eq!(cs3, ":4");
 }
+
+// =============================================================================
+// DELETION BOUNDARY TESTS: Behavior when trim boundary falls inside a deletion
+//
+// This tests the code path that causes a 1bp difference vs paftools.js liftover
+// in --qbed mode. When --qbed is used, the PAF is swapped (I↔D) and trimmed
+// by what were originally query coordinates (now target coordinates after swap).
+// An insertion in the original PAF becomes a deletion after swap. Trimming
+// into this deletion, then stripping trailing indels, produces the correct
+// result. paftools.js reports 1bp more in these cases.
+//
+// We test directly with a deletion-containing PAF to exercise the same
+// code path without needing to swap:
+//
+// PAF: Q 100000 0 100000 + T 130000 0 130000 100000 130000 60 cg:Z:50000M30000D50000M
+//
+// Query:  0 ............... 49999 |                              | 50000 ............. 99999
+//         |------ 50000M --------|                                |------ 50000M ----------|
+// Target: 0 ............... 49999 | 50000 ............... 79999  | 80000 ............. 129999
+//                                   |------- 30000D (no query) --|
+//
+// Block 1: query [0, 50000)     -> target [0, 50000)      50000M
+// Del:     query ---             -> target [50000, 80000)  30000D (no query movement)
+// Block 2: query [50000, 100000) -> target [80000, 130000) 50000M
+// =============================================================================
+
+fn big_del_paf() -> PafRecord {
+    PafRecord::new(
+        "Q 100000 0 100000 + T 130000 0 130000 100000 130000 60 cg:Z:50000M30000D50000M",
+    )
+    .unwrap()
+}
+
+#[test]
+fn trim_boundary_before_deletion() {
+    // Target region ends before the deletion — no ambiguity.
+    //
+    // Target: [0 .......... 39999]
+    //         |--- 50000M --|--- 30000D ---|--- 50000M ---|
+    // Query:  [0 .......... 39999]
+    //
+    // Expected: T:[0, 40000), Q:[0, 40000), CIGAR: 40000M
+    let paf = big_del_paf();
+    let trim = trim_paf_rec_to_rgn_fast(&rgn(0, 40000), &paf).unwrap();
+    assert_eq!((trim.t_st, trim.t_en), (0, 40000));
+    assert_eq!((trim.q_st, trim.q_en), (0, 40000));
+    assert_eq!(trim.cigar.to_string(), "40000M");
+}
+
+#[test]
+fn trim_boundary_at_deletion_start() {
+    // Target region ends exactly where the deletion starts.
+    //
+    // Target: [0 ................. 49999]
+    //         |------- 50000M ---------|--- 30000D ---|--- 50000M ---|
+    // Query:  [0 ................. 49999]
+    //
+    // Expected: T:[0, 50000), Q:[0, 50000), CIGAR: 50000M
+    let paf = big_del_paf();
+    let trim = trim_paf_rec_to_rgn_fast(&rgn(0, 50000), &paf).unwrap();
+    assert_eq!((trim.t_st, trim.t_en), (0, 50000));
+    assert_eq!((trim.q_st, trim.q_en), (0, 50000));
+    assert_eq!(trim.cigar.to_string(), "50000M");
+}
+
+#[test]
+fn trim_boundary_inside_deletion() {
+    // Target region ends inside the deletion (t=70000 is within [50000, 80000)).
+    // The deletion doesn't consume query bases, so the last aligned query
+    // position is still 49999.
+    //
+    // Target: [0 ................. 49999 | 50000 ..... 69999]
+    //         |------- 50000M ---------|  |-- partial 30000D --|
+    // Query:  [0 ................. 49999]  (no query movement)
+    //
+    // Expected: T:[0, 50000), Q:[0, 50000), CIGAR: 50000M
+    // The partial deletion is stripped as a trailing indel.
+    //
+    // NOTE: In --qbed mode, this corresponds to the case where paftools.js
+    // reports a +1bp overcount. rb correctly strips the trailing deletion.
+    let paf = big_del_paf();
+    let trim = trim_paf_rec_to_rgn_fast(&rgn(0, 70000), &paf).unwrap();
+    assert_eq!((trim.t_st, trim.t_en), (0, 50000));
+    assert_eq!((trim.q_st, trim.q_en), (0, 50000));
+    assert_eq!(trim.cigar.to_string(), "50000M");
+}
+
+#[test]
+fn trim_boundary_at_deletion_end() {
+    // Target region ends at the end of the deletion (t=80000).
+    // Same as "inside" — the deletion is stripped as trailing.
+    //
+    // Target: [0 ................. 49999 | 50000 ............... 79999]
+    //         |------- 50000M ---------|  |-------- 30000D ----------|
+    // Query:  [0 ................. 49999]  (no query movement)
+    //
+    // Expected: T:[0, 50000), Q:[0, 50000), CIGAR: 50000M
+    let paf = big_del_paf();
+    let trim = trim_paf_rec_to_rgn_fast(&rgn(0, 80000), &paf).unwrap();
+    assert_eq!((trim.t_st, trim.t_en), (0, 50000));
+    assert_eq!((trim.q_st, trim.q_en), (0, 50000));
+    assert_eq!(trim.cigar.to_string(), "50000M");
+}
+
+#[test]
+fn trim_boundary_after_deletion() {
+    // Target region spans past the deletion into the second match block.
+    //
+    // Target: [0 ............. 49999 | 50000 ....... 79999 | 80000 .... 89999]
+    //         |------ 50000M -------|  |---- 30000D ------|  |- 10000M -|
+    // Query:  [0 ............. 49999]                        [50000 . 59999]
+    //
+    // Expected: T:[0, 90000), Q:[0, 60000), CIGAR: 50000M30000D10000M
+    let paf = big_del_paf();
+    let trim = trim_paf_rec_to_rgn_fast(&rgn(0, 90000), &paf).unwrap();
+    assert_eq!((trim.t_st, trim.t_en), (0, 90000));
+    assert_eq!((trim.q_st, trim.q_en), (0, 60000));
+    assert_eq!(trim.cigar.to_string(), "50000M30000D10000M");
+}
+
+#[test]
+fn trim_start_inside_deletion() {
+    // Target region starts inside the deletion.
+    // The leading partial deletion is stripped.
+    //
+    // Target:                                 [60000 . 79999 | 80000 ..... 89999]
+    //         |------ 50000M -------|  |---- 30000D --------|  |- 10000M -|
+    // Query:                                                   [50000 . 59999]
+    //
+    // Expected: T:[80000, 90000), Q:[50000, 60000), CIGAR: 10000M
+    let paf = big_del_paf();
+    let trim = trim_paf_rec_to_rgn_fast(&rgn(60000, 90000), &paf).unwrap();
+    assert_eq!((trim.t_st, trim.t_en), (80000, 90000));
+    assert_eq!((trim.q_st, trim.q_en), (50000, 60000));
+    assert_eq!(trim.cigar.to_string(), "10000M");
+}
+
+#[test]
+fn trim_entirely_inside_deletion() {
+    // Target region falls entirely within the deletion.
+    // No query bases are covered — should return None.
+    //
+    // Target:                          [55000 ......... 75000]
+    //         |------ 50000M -------|  |---- 30000D --------|  |--- 50000M ---|
+    // Query:                           (no query movement)
+    //
+    // Expected: None (no aligned bases)
+    let paf = big_del_paf();
+    let trim = trim_paf_rec_to_rgn_fast(&rgn(55000, 75000), &paf);
+    assert!(
+        trim.is_none(),
+        "Region entirely within deletion should produce no output"
+    );
+}

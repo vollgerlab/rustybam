@@ -436,17 +436,17 @@ impl PafRecord {
             let caps = PAF_TAG.captures(token).unwrap();
             let tag = &caps[1];
             let value = &caps[3];
-            if tag == "cg" {
-                // cg tag takes precedence — parse CIGAR, discard any cs
-                log::trace!("parsing cigar of length: {}", value.len());
-                cigar =
-                    CigarString::try_from(value.as_bytes()).expect("Unable to parse cigar string.");
-                cs_ops = None;
-            } else if tag == "cs" && cigar.is_empty() {
-                // Only use cs tag when no cg tag is present
+            if tag == "cs" {
+                // cs tag takes precedence — it contains base-level detail
+                // that can generate a CIGAR but not vice versa
                 let parsed = parse_cs_string(value)?;
                 cigar = parsed.0;
                 cs_ops = Some(parsed.1);
+            } else if tag == "cg" && cs_ops.is_none() {
+                // Only use cg tag when no cs tag has been seen
+                log::trace!("parsing cigar of length: {}", value.len());
+                cigar =
+                    CigarString::try_from(value.as_bytes()).expect("Unable to parse cigar string.");
             } else {
                 tags.push('\t');
                 tags.push_str(token);
