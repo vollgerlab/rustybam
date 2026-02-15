@@ -101,7 +101,8 @@ pub fn trim_paf_rec_to_rgn_fast(rgn: &bed::Region, paf: &PafRecord) -> Option<Pa
         new_t_en = overlap_end;
         new_cigar_ops.push(update_cigar_opt_len(op, keep as u32));
         if let (Some(ref mut ncs), Some(ref cs)) = (&mut new_cs_ops, cs_ref) {
-            ncs.ops.push(cs.ops[ci].trim(skip_before as u32, keep as u32));
+            ncs.ops
+                .push(cs.ops[ci].trim(skip_before as u32, keep as u32));
         }
         if moves_q {
             q_in += keep;
@@ -206,14 +207,8 @@ pub fn trim_paf_rec_to_rgn_fast(rgn: &bed::Region, paf: &PafRecord) -> Option<Pa
 }
 
 pub fn trim_helper(name: &str, recs: &[PafRecord], rgns: &[bed::Region]) -> Vec<PafRecord> {
-    let cur_recs: Vec<&PafRecord> = recs
-        .par_iter()
-        .filter(|rec| rec.t_name == name)
-        .collect();
-    let cur_rgns: Vec<&bed::Region> = rgns
-        .par_iter()
-        .filter(|rgn| rgn.name == name)
-        .collect();
+    let cur_recs: Vec<&PafRecord> = recs.par_iter().filter(|rec| rec.t_name == name).collect();
+    let cur_rgns: Vec<&bed::Region> = rgns.par_iter().filter(|rgn| rgn.name == name).collect();
 
     let cur_trimmed_paf: Vec<PafRecord> = cur_recs
         .iter()
@@ -421,8 +416,7 @@ mod tests {
 
     #[test]
     fn test_break_paf() {
-        let rec =
-            PafRecord::new("Q 15 0 15 + T 10 0 10 9 15 60 cg:Z:5=5I5=").unwrap();
+        let rec = PafRecord::new("Q 15 0 15 + T 10 0 10 9 15 60 cg:Z:5=5I5=").unwrap();
         let broken = break_paf_on_indels(&rec, 0);
         for paf in &broken {
             eprintln!("{}", paf);
@@ -431,8 +425,7 @@ mod tests {
         assert_eq!(broken.len(), 2, "Should break into 2 records");
 
         // Reverse strand
-        let rec =
-            PafRecord::new("Q 15 0 15 - T 10 0 10 9 15 60 cg:Z:5=5I5=").unwrap();
+        let rec = PafRecord::new("Q 15 0 15 - T 10 0 10 9 15 60 cg:Z:5=5I5=").unwrap();
         let broken = break_paf_on_indels(&rec, 0);
         for paf in &broken {
             eprintln!("{}", paf);
@@ -441,8 +434,7 @@ mod tests {
         assert_eq!(broken.len(), 2, "Should break into 2 records");
 
         // Test with deletion break
-        let rec =
-            PafRecord::new("Q 10 0 10 + T 15 0 15 9 15 60 cg:Z:5=5D5=").unwrap();
+        let rec = PafRecord::new("Q 10 0 10 + T 15 0 15 9 15 60 cg:Z:5=5D5=").unwrap();
         let broken = break_paf_on_indels(&rec, 0);
         for paf in &broken {
             eprintln!("{}", paf);

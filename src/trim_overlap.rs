@@ -16,7 +16,11 @@ fn compute_overlap_scores(
     let overlap_len = (q_end - q_start) as usize;
     let mut scores = vec![0i32; overlap_len];
 
-    let mut q_pos = if paf.strand == '+' { paf.q_st } else { paf.q_en };
+    let mut q_pos = if paf.strand == '+' {
+        paf.q_st
+    } else {
+        paf.q_en
+    };
 
     for op in paf.cigar.into_iter() {
         let op_len = op.len() as u64;
@@ -85,8 +89,10 @@ pub fn trim_overlapping_pafs(
     let en_ovl = min(left.q_en, right.q_en);
     log::info!("Number of overlapping bases {}", en_ovl - st_ovl);
 
-    let l_scores = compute_overlap_scores(left, st_ovl, en_ovl, match_score, diff_score, indel_score);
-    let r_scores = compute_overlap_scores(right, st_ovl, en_ovl, match_score, diff_score, indel_score);
+    let l_scores =
+        compute_overlap_scores(left, st_ovl, en_ovl, match_score, diff_score, indel_score);
+    let r_scores =
+        compute_overlap_scores(right, st_ovl, en_ovl, match_score, diff_score, indel_score);
 
     // Build cumulative scores: l_score has a leading 0, r_score has a trailing 0
     let mut l_score = vec![0i32];
@@ -141,8 +147,14 @@ mod tests {
         for rec in &paf.records {
             println!(
                 "  {}:{}-{} ({}) -> {}:{}-{} cigar={}",
-                rec.q_name, rec.q_st, rec.q_en, rec.strand,
-                rec.t_name, rec.t_st, rec.t_en, rec.cigar
+                rec.q_name,
+                rec.q_st,
+                rec.q_en,
+                rec.strand,
+                rec.t_name,
+                rec.t_st,
+                rec.t_en,
+                rec.cigar
             );
         }
     }

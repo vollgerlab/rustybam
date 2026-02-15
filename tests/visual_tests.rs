@@ -1082,8 +1082,7 @@ fn complex_multiple_indels() {
     //   2D (t:8→10): overlap [8,10), keep=2. Push 2D.
     //   1= (t:10→11): overlap [10,11), keep=1. Push 1=. q_in += 1 = 6. 11>=11.
     //   Result: 3=1D2=2D1=, T:[2,11), Q:[5,11)
-    let paf =
-        PafRecord::new("Q 15 0 15 + T 14 0 14 10 14 60 cg:Z:2=3I3=1D2=2D1=1I3=").unwrap();
+    let paf = PafRecord::new("Q 15 0 15 + T 14 0 14 10 14 60 cg:Z:2=3I3=1D2=2D1=1I3=").unwrap();
     let trim = trim_paf_rec_to_rgn_fast(&rgn(2, 11), &paf).unwrap();
     assert_eq!(trim.cigar.to_string(), "3=1D2=2D1=");
     assert_eq!((trim.t_st, trim.t_en), (2, 11));
@@ -1113,7 +1112,10 @@ fn cs_break_preserves_cs_ops() {
 
     // All records should have cs_ops
     for rec in &broken {
-        assert!(rec.cs_ops.is_some(), "cs_ops should be preserved through break-paf");
+        assert!(
+            rec.cs_ops.is_some(),
+            "cs_ops should be preserved through break-paf"
+        );
     }
 
     let cs1: String = broken[0].cs_ops.as_ref().unwrap().to_cs_string();
@@ -1150,10 +1152,8 @@ fn cs_break_preserves_cs_ops() {
 // =============================================================================
 
 fn big_del_paf() -> PafRecord {
-    PafRecord::new(
-        "Q 100000 0 100000 + T 130000 0 130000 100000 130000 60 cg:Z:50000M30000D50000M",
-    )
-    .unwrap()
+    PafRecord::new("Q 100000 0 100000 + T 130000 0 130000 100000 130000 60 cg:Z:50000M30000D50000M")
+        .unwrap()
 }
 
 #[test]

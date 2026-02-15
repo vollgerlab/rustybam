@@ -390,9 +390,7 @@ impl CsOps {
     #[inline]
     pub fn op_seq(&self, op: &CsOp) -> Option<&[u8]> {
         match op {
-            CsOp::MatchSeq(off, len)
-            | CsOp::Insertion(off, len)
-            | CsOp::Deletion(off, len) => {
+            CsOp::MatchSeq(off, len) | CsOp::Insertion(off, len) | CsOp::Deletion(off, len) => {
                 Some(&self.seq_data[*off as usize..(*off + *len) as usize])
             }
             _ => None,
@@ -483,9 +481,7 @@ impl PafRecord {
         let mut cg_idx: Option<usize> = None;
         for (i, token) in t.iter().enumerate().skip(12) {
             debug_assert!(
-                token.len() >= 5
-                    && token.as_bytes()[2] == b':'
-                    && token.as_bytes()[4] == b':',
+                token.len() >= 5 && token.as_bytes()[2] == b':' && token.as_bytes()[4] == b':',
                 "Malformed PAF tag: {}",
                 token
             );
@@ -512,8 +508,7 @@ impl PafRecord {
         } else if let Some(idx) = cg_idx {
             let value = &t[idx][5..];
             log::trace!("parsing cigar of length: {}", value.len());
-            cigar =
-                CigarString::try_from(value.as_bytes()).expect("Unable to parse cigar string.");
+            cigar = CigarString::try_from(value.as_bytes()).expect("Unable to parse cigar string.");
         }
 
         // make the record
@@ -799,7 +794,11 @@ impl PafRecord {
             seq_data: cd.seq_data.clone(), // share the same backing buffer
         });
 
-        let mut q_pos = if self.strand == '+' { self.q_st } else { self.q_en };
+        let mut q_pos = if self.strand == '+' {
+            self.q_st
+        } else {
+            self.q_en
+        };
         let mut new_cigar_ops: Vec<Cigar> = Vec::new();
         let mut t_before: u64 = 0;
         let mut q_consumed_before: u64 = 0;
@@ -871,7 +870,8 @@ impl PafRecord {
             q_consumed_in += keep;
             new_cigar_ops.push(update_cigar_opt_len(op, keep as u32));
             if let (Some(ref mut ncs), Some(ref cs)) = (&mut new_cs_ops, &cs_data) {
-                ncs.ops.push(cs.ops[ci].trim(skip_before_cigar as u32, keep as u32));
+                ncs.ops
+                    .push(cs.ops[ci].trim(skip_before_cigar as u32, keep as u32));
             }
 
             // Check if we've reached the far boundary
@@ -1166,10 +1166,7 @@ pub struct PafWriter {
 impl PafWriter {
     pub fn new() -> Self {
         PafWriter {
-            out: std::io::BufWriter::with_capacity(
-                64 * 1024,
-                std::io::stdout().lock(),
-            ),
+            out: std::io::BufWriter::with_capacity(64 * 1024, std::io::stdout().lock()),
             buf: String::with_capacity(512 * 1024),
         }
     }

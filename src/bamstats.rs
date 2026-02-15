@@ -277,10 +277,7 @@ pub struct StatsWriter {
 impl StatsWriter {
     pub fn new() -> Self {
         StatsWriter {
-            out: std::io::BufWriter::with_capacity(
-                64 * 1024,
-                std::io::stdout().lock(),
-            ),
+            out: std::io::BufWriter::with_capacity(64 * 1024, std::io::stdout().lock()),
             buf: String::with_capacity(4096),
         }
     }
@@ -314,36 +311,65 @@ impl StatsWriter {
         let buf = &mut self.buf;
 
         if qbed {
-            buf.push_str(&stats.q_nm);   buf.push('\t');
-            push_i64(buf, stats.q_st);    buf.push('\t');
-            push_i64(buf, stats.q_en);    buf.push('\t');
-            push_i64(buf, stats.q_len);   buf.push('\t');
-            buf.push(stats.strand);       buf.push('\t');
-            buf.push_str(&stats.r_nm);   buf.push('\t');
-            push_i64(buf, stats.r_st);    buf.push('\t');
-            push_i64(buf, stats.r_en);    buf.push('\t');
-            push_i64(buf, stats.r_len);   buf.push('\t');
+            buf.push_str(&stats.q_nm);
+            buf.push('\t');
+            push_i64(buf, stats.q_st);
+            buf.push('\t');
+            push_i64(buf, stats.q_en);
+            buf.push('\t');
+            push_i64(buf, stats.q_len);
+            buf.push('\t');
+            buf.push(stats.strand);
+            buf.push('\t');
+            buf.push_str(&stats.r_nm);
+            buf.push('\t');
+            push_i64(buf, stats.r_st);
+            buf.push('\t');
+            push_i64(buf, stats.r_en);
+            buf.push('\t');
+            push_i64(buf, stats.r_len);
+            buf.push('\t');
         } else {
-            buf.push_str(&stats.r_nm);   buf.push('\t');
-            push_i64(buf, stats.r_st);    buf.push('\t');
-            push_i64(buf, stats.r_en);    buf.push('\t');
-            push_i64(buf, stats.r_len);   buf.push('\t');
-            buf.push(stats.strand);       buf.push('\t');
-            buf.push_str(&stats.q_nm);   buf.push('\t');
-            push_i64(buf, stats.q_st);    buf.push('\t');
-            push_i64(buf, stats.q_en);    buf.push('\t');
-            push_i64(buf, stats.q_len);   buf.push('\t');
+            buf.push_str(&stats.r_nm);
+            buf.push('\t');
+            push_i64(buf, stats.r_st);
+            buf.push('\t');
+            push_i64(buf, stats.r_en);
+            buf.push('\t');
+            push_i64(buf, stats.r_len);
+            buf.push('\t');
+            buf.push(stats.strand);
+            buf.push('\t');
+            buf.push_str(&stats.q_nm);
+            buf.push('\t');
+            push_i64(buf, stats.q_st);
+            buf.push('\t');
+            push_i64(buf, stats.q_en);
+            buf.push('\t');
+            push_i64(buf, stats.q_len);
+            buf.push('\t');
         }
 
         // floats — use ryu for fast float formatting (write! is fine here, only 3 values)
-        write!(buf, "{}\t{}\t{}\t", stats.id_by_matches, stats.id_by_events, stats.id_by_all).unwrap();
+        write!(
+            buf,
+            "{}\t{}\t{}\t",
+            stats.id_by_matches, stats.id_by_events, stats.id_by_all
+        )
+        .unwrap();
 
-        push_u32(buf, stats.equal);       buf.push('\t');
-        push_u32(buf, stats.diff);        buf.push('\t');
-        push_u32(buf, stats.del_events);  buf.push('\t');
-        push_u32(buf, stats.ins_events);  buf.push('\t');
-        push_u32(buf, stats.del);         buf.push('\t');
-        push_u32(buf, stats.ins);         buf.push('\n');
+        push_u32(buf, stats.equal);
+        buf.push('\t');
+        push_u32(buf, stats.diff);
+        buf.push('\t');
+        push_u32(buf, stats.del_events);
+        buf.push('\t');
+        push_u32(buf, stats.ins_events);
+        buf.push('\t');
+        push_u32(buf, stats.del);
+        buf.push('\t');
+        push_u32(buf, stats.ins);
+        buf.push('\n');
 
         self.out.write_all(self.buf.as_bytes()).unwrap();
     }
