@@ -5,9 +5,7 @@ use super::trim_overlap::trim_overlapping_pafs;
 use bio::alphabets::dna::revcomp;
 use core::fmt;
 use itertools::Itertools;
-use lazy_static::lazy_static;
 use natord;
-use regex::Regex;
 use rust_htslib::bam::record::Cigar::*;
 use rust_htslib::bam::record::CigarString;
 use rust_htslib::bam::record::*;
@@ -17,9 +15,7 @@ use std::convert::TryFrom;
 use std::io::BufRead;
 use std::str::FromStr;
 
-lazy_static! {
-    static ref PAF_TAG: Regex = Regex::new("(..):(.):(.*)").unwrap();
-}
+// PAF_TAG regex removed — tags are parsed via direct string slicing (XX:Y:VALUE format)
 
 #[derive(Debug)]
 pub enum Error {
@@ -342,51 +338,103 @@ impl Paf {
 }
 
 /// A single cs-tag operation, stored in 1:1 correspondence with CIGAR ops.
-#[derive(Debug, Clone)]
+/// Sequence data is stored externally in `CsOps::seq_data`; variants that
+/// carry sequence use `(offset, len)` into that shared buffer.
+#[derive(Debug, Clone, Copy)]
 pub enum CsOp {
     /// `:N` — N matching bases (compact form, no sequence)
     Matches(u32),
-    /// `=ACGT` — matching bases with explicit sequence
-    MatchSeq(Vec<u8>),
+    /// `=ACGT` — matching bases with explicit sequence (offset, len into seq_data)
+    MatchSeq(u32, u32),
     /// `*xy` — single-base mismatch (ref base, query base)
     Mismatch(u8, u8),
-    /// `+acgt` — insertion of query bases
-    Insertion(Vec<u8>),
-    /// `-acgt` — deletion of reference bases
-    Deletion(Vec<u8>),
+    /// `+acgt` — insertion of query bases (offset, len into seq_data)
+    Insertion(u32, u32),
+    /// `-acgt` — deletion of reference bases (offset, len into seq_data)
+    Deletion(u32, u32),
 }
 
 impl CsOp {
     /// Trim this op to keep only bases at [skip..skip+keep).
+    /// Adjusts offsets into the shared seq_data buffer — no allocation.
     pub fn trim(&self, skip: u32, keep: u32) -> CsOp {
         match self {
             CsOp::Matches(_) => CsOp::Matches(keep),
-            CsOp::MatchSeq(s) => {
-                CsOp::MatchSeq(s[skip as usize..(skip + keep) as usize].to_vec())
-            }
+            CsOp::MatchSeq(off, _) => CsOp::MatchSeq(off + skip, keep),
             CsOp::Mismatch(r, q) => {
                 debug_assert!(skip == 0 && keep == 1);
                 CsOp::Mismatch(*r, *q)
             }
-            CsOp::Insertion(s) => {
-                CsOp::Insertion(s[skip as usize..(skip + keep) as usize].to_vec())
-            }
-            CsOp::Deletion(s) => {
-                CsOp::Deletion(s[skip as usize..(skip + keep) as usize].to_vec())
-            }
+            CsOp::Insertion(off, _) => CsOp::Insertion(off + skip, keep),
+            CsOp::Deletion(off, _) => CsOp::Deletion(off + skip, keep),
         }
     }
 }
 
-impl fmt::Display for CsOp {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            CsOp::Matches(n) => write!(f, ":{}", n),
-            CsOp::MatchSeq(s) => write!(f, "={}", std::str::from_utf8(s).unwrap()),
-            CsOp::Mismatch(r, q) => write!(f, "*{}{}", *r as char, *q as char),
-            CsOp::Insertion(s) => write!(f, "+{}", std::str::from_utf8(s).unwrap()),
-            CsOp::Deletion(s) => write!(f, "-{}", std::str::from_utf8(s).unwrap()),
+/// Bundled cs-tag operations with a single shared buffer for all sequence data.
+/// This avoids per-op heap allocations: one `Vec<u8>` instead of thousands.
+#[derive(Debug, Clone)]
+pub struct CsOps {
+    pub ops: Vec<CsOp>,
+    pub seq_data: Vec<u8>,
+}
+
+impl CsOps {
+    /// Get the sequence bytes for an op that carries sequence data.
+    #[inline]
+    pub fn seq(&self, offset: u32, len: u32) -> &[u8] {
+        &self.seq_data[offset as usize..(offset + len) as usize]
+    }
+
+    /// Get the sequence bytes for any op, returning None for Matches/Mismatch.
+    #[inline]
+    pub fn op_seq(&self, op: &CsOp) -> Option<&[u8]> {
+        match op {
+            CsOp::MatchSeq(off, len)
+            | CsOp::Insertion(off, len)
+            | CsOp::Deletion(off, len) => {
+                Some(&self.seq_data[*off as usize..(*off + *len) as usize])
+            }
+            _ => None,
         }
+    }
+
+    /// Format the full cs-tag string (without the `cs:Z:` prefix).
+    pub fn to_cs_string(&self) -> String {
+        let mut buf = String::new();
+        for op in &self.ops {
+            match op {
+                CsOp::Matches(n) => {
+                    buf.push(':');
+                    let mut tmp = itoa::Buffer::new();
+                    buf.push_str(tmp.format(*n));
+                }
+                CsOp::MatchSeq(off, len) => {
+                    buf.push('=');
+                    buf.push_str(std::str::from_utf8(self.seq(*off, *len)).unwrap());
+                }
+                CsOp::Mismatch(r, q) => {
+                    buf.push('*');
+                    buf.push(*r as char);
+                    buf.push(*q as char);
+                }
+                CsOp::Insertion(off, len) => {
+                    buf.push('+');
+                    buf.push_str(std::str::from_utf8(self.seq(*off, *len)).unwrap());
+                }
+                CsOp::Deletion(off, len) => {
+                    buf.push('-');
+                    buf.push_str(std::str::from_utf8(self.seq(*off, *len)).unwrap());
+                }
+            }
+        }
+        buf
+    }
+}
+
+impl fmt::Display for CsOps {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str(&self.to_cs_string())
     }
 }
 
@@ -405,9 +453,10 @@ pub struct PafRecord {
     pub aln_len: u64,
     pub mapq: u64,
     pub cigar: CigarString,
-    /// Parsed cs-tag ops, in 1:1 correspondence with `cigar`.
-    /// `None` when input was CIGAR (cg tag); `Some` when input was cs tag.
-    pub cs_ops: Option<Vec<CsOp>>,
+    /// Parsed cs-tag ops with shared sequence buffer, in 1:1 correspondence
+    /// with `cigar`. `None` when input was CIGAR (cg tag); `Some` when input
+    /// was cs tag.
+    pub cs_ops: Option<CsOps>,
     pub tags: String,
     pub id: String,
     pub order: u64,
@@ -426,31 +475,45 @@ impl PafRecord {
     pub fn new(line: &str) -> PafResult<PafRecord> {
         let t: Vec<&str> = line.split_ascii_whitespace().collect();
         assert!(t.len() >= 12); // must have all required columns
-                                // collect all the tags if any
+
+        // Two-pass tag scanning: first find cs/cg positions (tag order is not
+        // guaranteed by the PAF spec), then parse only the preferred one.
         let mut tags = "".to_string();
-        // find the cigar if it is there
-        let mut cigar = CigarString(vec![]);
-        let mut cs_ops: Option<Vec<CsOp>> = None;
-        for token in t.iter().skip(12) {
-            assert!(PAF_TAG.is_match(token));
-            let caps = PAF_TAG.captures(token).unwrap();
-            let tag = &caps[1];
-            let value = &caps[3];
+        let mut cs_idx: Option<usize> = None;
+        let mut cg_idx: Option<usize> = None;
+        for (i, token) in t.iter().enumerate().skip(12) {
+            debug_assert!(
+                token.len() >= 5
+                    && token.as_bytes()[2] == b':'
+                    && token.as_bytes()[4] == b':',
+                "Malformed PAF tag: {}",
+                token
+            );
+            let tag = &token[..2];
             if tag == "cs" {
-                // cs tag takes precedence — it contains base-level detail
-                // that can generate a CIGAR but not vice versa
-                let parsed = parse_cs_string(value)?;
-                cigar = parsed.0;
-                cs_ops = Some(parsed.1);
-            } else if tag == "cg" && cs_ops.is_none() {
-                // Only use cg tag when no cs tag has been seen
-                log::trace!("parsing cigar of length: {}", value.len());
-                cigar =
-                    CigarString::try_from(value.as_bytes()).expect("Unable to parse cigar string.");
+                cs_idx = Some(i);
+            } else if tag == "cg" {
+                cg_idx = Some(i);
             } else {
                 tags.push('\t');
                 tags.push_str(token);
             }
+        }
+
+        // Parse cs (preferred) or cg — never both.
+        // cs gives us both cigar and cs_ops; cg gives us only cigar.
+        let mut cigar = CigarString(vec![]);
+        let mut cs_ops: Option<CsOps> = None;
+        if let Some(idx) = cs_idx {
+            let value = &t[idx][5..];
+            let (parsed_cigar, parsed_ops) = parse_cs_string(value)?;
+            cigar = parsed_cigar;
+            cs_ops = Some(parsed_ops);
+        } else if let Some(idx) = cg_idx {
+            let value = &t[idx][5..];
+            log::trace!("parsing cigar of length: {}", value.len());
+            cigar =
+                CigarString::try_from(value.as_bytes()).expect("Unable to parse cigar string.");
         }
 
         // make the record
@@ -688,8 +751,9 @@ impl PafRecord {
         self.cigar = CigarString(self.cigar.0[remove_st_opts..].to_vec());
         self.cigar.0.truncate(self.cigar.len() - remove_en_opts);
         if let Some(ref mut cs) = self.cs_ops {
-            *cs = cs[remove_st_opts..].to_vec();
-            cs.truncate(cs.len() - remove_en_opts);
+            cs.ops = cs.ops[remove_st_opts..].to_vec();
+            cs.ops.truncate(cs.ops.len() - remove_en_opts);
+            // seq_data stays as-is; offsets in remaining ops are still valid
         }
 
         // update the target coordinates
@@ -729,8 +793,11 @@ impl PafRecord {
             return;
         }
 
-        let cs_vec = self.cs_ops.take(); // take ownership for parallel processing
-        let mut new_cs_ops: Option<Vec<CsOp>> = cs_vec.as_ref().map(|_| Vec::new());
+        let cs_data = self.cs_ops.take(); // take ownership for parallel processing
+        let mut new_cs_ops: Option<CsOps> = cs_data.as_ref().map(|cd| CsOps {
+            ops: Vec::new(),
+            seq_data: cd.seq_data.clone(), // share the same backing buffer
+        });
 
         let mut q_pos = if self.strand == '+' { self.q_st } else { self.q_en };
         let mut new_cigar_ops: Vec<Cigar> = Vec::new();
@@ -752,8 +819,8 @@ impl PafRecord {
                 // Deletion or ref skip — doesn't advance query
                 if started {
                     new_cigar_ops.push(*op);
-                    if let (Some(ref mut ncs), Some(ref cs)) = (&mut new_cs_ops, &cs_vec) {
-                        ncs.push(cs[ci].clone());
+                    if let (Some(ref mut ncs), Some(ref cs)) = (&mut new_cs_ops, &cs_data) {
+                        ncs.ops.push(cs.ops[ci]);
                     }
                 } else if moves_t {
                     t_before += op_len;
@@ -803,8 +870,8 @@ impl PafRecord {
 
             q_consumed_in += keep;
             new_cigar_ops.push(update_cigar_opt_len(op, keep as u32));
-            if let (Some(ref mut ncs), Some(ref cs)) = (&mut new_cs_ops, &cs_vec) {
-                ncs.push(cs[ci].trim(skip_before_cigar as u32, keep as u32));
+            if let (Some(ref mut ncs), Some(ref cs)) = (&mut new_cs_ops, &cs_data) {
+                ncs.ops.push(cs.ops[ci].trim(skip_before_cigar as u32, keep as u32));
             }
 
             // Check if we've reached the far boundary
@@ -836,7 +903,7 @@ impl PafRecord {
             }
             new_cigar_ops.remove(0);
             if let Some(ref mut ncs) = new_cs_ops {
-                ncs.remove(0);
+                ncs.ops.remove(0);
             }
         }
         t_before += lead_t;
@@ -855,7 +922,7 @@ impl PafRecord {
             }
             new_cigar_ops.pop();
             if let Some(ref mut ncs) = new_cs_ops {
-                ncs.pop();
+                ncs.ops.pop();
             }
         }
         q_consumed_in -= trail_q;
@@ -988,34 +1055,131 @@ impl PafRecord {
     }
 }
 
-impl fmt::Display for PafRecord {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\tid:Z:{}\tcg:Z:{}",
-            self.q_name,
-            self.q_len,
-            self.q_st,
-            self.q_en,
-            self.strand,
-            self.t_name,
-            self.t_len,
-            self.t_st,
-            self.t_en,
-            self.nmatch,
-            self.aln_len,
-            self.mapq,
-            self.id,
-            self.cigar,
-        )?;
-        // Also output cs tag if present
-        if let Some(ref cs_ops) = self.cs_ops {
-            write!(f, "\tcs:Z:")?;
-            for op in cs_ops {
-                write!(f, "{}", op)?;
+impl PafRecord {
+    /// Write this record into a reusable String buffer, avoiding per-record
+    /// heap allocation. The caller should call `buf.clear()` before each use
+    /// and reuse the same buffer across records.
+    ///
+    /// Uses `itoa` for integer formatting to bypass `core::fmt` dynamic dispatch,
+    /// which was measured at ~57% of main-thread time in profiling.
+    pub fn write_to_buf(&self, buf: &mut String) {
+        // Helper: append a u64 via itoa (no fmt overhead)
+        #[inline(always)]
+        fn push_u64(buf: &mut String, v: u64) {
+            let mut tmp = itoa::Buffer::new();
+            buf.push_str(tmp.format(v));
+        }
+        #[inline(always)]
+        fn push_u32(buf: &mut String, v: u32) {
+            let mut tmp = itoa::Buffer::new();
+            buf.push_str(tmp.format(v));
+        }
+
+        buf.push_str(&self.q_name);
+        buf.push('\t');
+        push_u64(buf, self.q_len);
+        buf.push('\t');
+        push_u64(buf, self.q_st);
+        buf.push('\t');
+        push_u64(buf, self.q_en);
+        buf.push('\t');
+        buf.push(self.strand);
+        buf.push('\t');
+        buf.push_str(&self.t_name);
+        buf.push('\t');
+        push_u64(buf, self.t_len);
+        buf.push('\t');
+        push_u64(buf, self.t_st);
+        buf.push('\t');
+        push_u64(buf, self.t_en);
+        buf.push('\t');
+        push_u64(buf, self.nmatch);
+        buf.push('\t');
+        push_u64(buf, self.aln_len);
+        buf.push('\t');
+        push_u64(buf, self.mapq);
+        buf.push_str("\tid:Z:");
+        buf.push_str(&self.id);
+        buf.push_str("\tcg:Z:");
+
+        for op in self.cigar.iter() {
+            push_u32(buf, op.len());
+            buf.push(match op {
+                Match(_) => 'M',
+                Ins(_) => 'I',
+                Del(_) => 'D',
+                RefSkip(_) => 'N',
+                SoftClip(_) => 'S',
+                HardClip(_) => 'H',
+                Pad(_) => 'P',
+                Equal(_) => '=',
+                Diff(_) => 'X',
+            });
+        }
+
+        if let Some(ref cs) = self.cs_ops {
+            buf.push_str("\tcs:Z:");
+            for op in &cs.ops {
+                match op {
+                    CsOp::Matches(n) => {
+                        buf.push(':');
+                        push_u32(buf, *n);
+                    }
+                    CsOp::MatchSeq(off, len) => {
+                        buf.push('=');
+                        buf.push_str(std::str::from_utf8(cs.seq(*off, *len)).unwrap());
+                    }
+                    CsOp::Mismatch(r, q) => {
+                        buf.push('*');
+                        buf.push(*r as char);
+                        buf.push(*q as char);
+                    }
+                    CsOp::Insertion(off, len) => {
+                        buf.push('+');
+                        buf.push_str(std::str::from_utf8(cs.seq(*off, *len)).unwrap());
+                    }
+                    CsOp::Deletion(off, len) => {
+                        buf.push('-');
+                        buf.push_str(std::str::from_utf8(cs.seq(*off, *len)).unwrap());
+                    }
+                }
             }
         }
-        Ok(())
+    }
+}
+
+impl fmt::Display for PafRecord {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let mut buf = String::with_capacity(256);
+        self.write_to_buf(&mut buf);
+        f.write_str(&buf)
+    }
+}
+
+/// Helper for fast PAF output: locks stdout once, uses a BufWriter, and
+/// reuses a single String buffer across all records.
+pub struct PafWriter {
+    out: std::io::BufWriter<std::io::StdoutLock<'static>>,
+    buf: String,
+}
+
+impl PafWriter {
+    pub fn new() -> Self {
+        PafWriter {
+            out: std::io::BufWriter::with_capacity(
+                64 * 1024,
+                std::io::stdout().lock(),
+            ),
+            buf: String::with_capacity(512 * 1024),
+        }
+    }
+
+    pub fn write_rec(&mut self, rec: &PafRecord) {
+        use std::io::Write;
+        self.buf.clear();
+        rec.write_to_buf(&mut self.buf);
+        self.out.write_all(self.buf.as_bytes()).unwrap();
+        self.out.write_all(b"\n").unwrap();
     }
 }
 
@@ -1158,19 +1322,23 @@ pub fn paf_swap_query_and_target(paf: &PafRecord) -> PafRecord {
     flipped.cigar = cigar_swap_target_query(&paf.cigar, paf.strand);
 
     // flip cs_ops: swap Insertion ↔ Deletion
-    flipped.cs_ops = paf.cs_ops.as_ref().map(|ops| {
-        let mut new_ops: Vec<CsOp> = ops
+    flipped.cs_ops = paf.cs_ops.as_ref().map(|cs| {
+        let mut new_ops: Vec<CsOp> = cs
+            .ops
             .iter()
             .map(|op| match op {
-                CsOp::Insertion(s) => CsOp::Deletion(s.clone()),
-                CsOp::Deletion(s) => CsOp::Insertion(s.clone()),
-                other => other.clone(),
+                CsOp::Insertion(off, len) => CsOp::Deletion(*off, *len),
+                CsOp::Deletion(off, len) => CsOp::Insertion(*off, *len),
+                other => *other,
             })
             .collect();
         if paf.strand == '-' {
             new_ops.reverse();
         }
-        new_ops
+        CsOps {
+            ops: new_ops,
+            seq_data: cs.seq_data.clone(),
+        }
     });
 
     flipped
@@ -1180,28 +1348,35 @@ pub fn make_fake_paf_rec() -> PafRecord {
     PafRecord::new("Q 10 2 10 - T 20 12 20 3 9 60 cg:Z:4M1I1D3=").unwrap()
 }
 
-/// Parse a cs-tag string into both a CigarString and a Vec<CsOp>.
+/// Parse a cs-tag string into both a CigarString and a CsOps (ops + shared seq buffer).
 /// Supports both long form (`=ACGT`, `*at`) and short form (`:10`).
+///
+/// All sequence data is stored in a single contiguous `Vec<u8>` — one allocation
+/// instead of thousands of per-op `Vec<u8>` allocations.
 ///
 /// # Example
 /// ```
 /// use rust_htslib::bam::record::Cigar::*;
 /// use rustybam::paf;
-/// let (cigar, cs_ops) = paf::parse_cs_string(":10=ACGTN+acgtn-acgtn*at=A").unwrap();
+/// let (cigar, cs) = paf::parse_cs_string(":10=ACGTN+acgtn-acgtn*at=A").unwrap();
 /// assert_eq!(cigar[0], Equal(10));
 /// assert_eq!(cigar[1], Equal(5));
 /// assert_eq!(cigar[2], Ins(5));
 /// assert_eq!(cigar[3], Del(5));
 /// assert_eq!(cigar[4], Diff(1));
 /// assert_eq!(cigar[5], Equal(1));
-/// assert_eq!(cs_ops.len(), cigar.len());
+/// assert_eq!(cs.ops.len(), cigar.len());
 /// ```
-pub fn parse_cs_string(cs: &str) -> PafResult<(CigarString, Vec<CsOp>)> {
+pub fn parse_cs_string(cs: &str) -> PafResult<(CigarString, CsOps)> {
     let bytes = cs.as_bytes();
     let length = bytes.len();
     let mut i = 0;
-    let mut cigar = vec![];
-    let mut cs_ops = vec![];
+    // Pre-allocate: each CS op is at least 2 chars, so len/2 is an upper bound
+    let estimated_ops = length / 2;
+    let mut cigar = Vec::with_capacity(estimated_ops);
+    let mut ops = Vec::with_capacity(estimated_ops);
+    // Single buffer for all sequence data — upper bound is the full cs string length
+    let mut seq_data: Vec<u8> = Vec::with_capacity(length);
     while i < length {
         let cs_opt = bytes[i];
         i += 1; // past the operator
@@ -1211,10 +1386,11 @@ pub fn parse_cs_string(cs: &str) -> PafResult<(CigarString, Vec<CsOp>)> {
                 while i < length && matches!(bytes[i], b'A' | b'C' | b'G' | b'T' | b'N') {
                     i += 1;
                 }
-                let seq = bytes[start..i].to_vec();
-                let l = seq.len() as u32;
+                let l = (i - start) as u32;
+                let offset = seq_data.len() as u32;
+                seq_data.extend_from_slice(&bytes[start..i]);
                 cigar.push(Cigar::Equal(l));
-                cs_ops.push(CsOp::MatchSeq(seq));
+                ops.push(CsOp::MatchSeq(offset, l));
             }
             b':' => {
                 let start = i;
@@ -1225,34 +1401,36 @@ pub fn parse_cs_string(cs: &str) -> PafResult<(CigarString, Vec<CsOp>)> {
                     msg: "Expected integer in cs :N operator".to_string(),
                 })?;
                 cigar.push(Cigar::Equal(l));
-                cs_ops.push(CsOp::Matches(l));
+                ops.push(CsOp::Matches(l));
             }
             b'*' => {
                 let ref_base = bytes[i];
                 let query_base = bytes[i + 1];
                 i += 2;
                 cigar.push(Cigar::Diff(1));
-                cs_ops.push(CsOp::Mismatch(ref_base, query_base));
+                ops.push(CsOp::Mismatch(ref_base, query_base));
             }
             b'+' => {
                 let start = i;
                 while i < length && bytes[i].is_ascii_lowercase() {
                     i += 1;
                 }
-                let seq = bytes[start..i].to_vec();
-                let l = seq.len() as u32;
+                let l = (i - start) as u32;
+                let offset = seq_data.len() as u32;
+                seq_data.extend_from_slice(&bytes[start..i]);
                 cigar.push(Cigar::Ins(l));
-                cs_ops.push(CsOp::Insertion(seq));
+                ops.push(CsOp::Insertion(offset, l));
             }
             b'-' => {
                 let start = i;
                 while i < length && bytes[i].is_ascii_lowercase() {
                     i += 1;
                 }
-                let seq = bytes[start..i].to_vec();
-                let l = seq.len() as u32;
+                let l = (i - start) as u32;
+                let offset = seq_data.len() as u32;
+                seq_data.extend_from_slice(&bytes[start..i]);
                 cigar.push(Cigar::Del(l));
-                cs_ops.push(CsOp::Deletion(seq));
+                ops.push(CsOp::Deletion(offset, l));
             }
             b'~' => {
                 return Err(Error::PafParseCS {
@@ -1266,7 +1444,7 @@ pub fn parse_cs_string(cs: &str) -> PafResult<(CigarString, Vec<CsOp>)> {
             }
         }
     }
-    Ok((CigarString(cigar), cs_ops))
+    Ok((CigarString(cigar), CsOps { ops, seq_data }))
 }
 
 /// Parse a cs-tag string into a CigarString (convenience wrapper).
@@ -1284,6 +1462,81 @@ pub fn parse_cs_string(cs: &str) -> PafResult<(CigarString, Vec<CsOp>)> {
 /// assert_eq!(cigar[5], Equal(1));
 /// ```
 pub fn cs_to_cigar(cs: &str) -> PafResult<CigarString> {
-    let (cigar, _) = parse_cs_string(cs)?;
-    Ok(cigar)
+    cigar_from_cs(cs)
+}
+
+/// Fast cs-tag to CigarString parser. Only extracts operation types and lengths
+/// without allocating sequence data. Use `parse_cs_string` when you need full
+/// base-level CsOp detail.
+///
+/// # Example
+/// ```
+/// use rust_htslib::bam::record::Cigar::*;
+/// use rustybam::paf;
+/// let cigar = paf::cigar_from_cs(":10=ACGTN+acgtn-acgtn*at=A").unwrap();
+/// assert_eq!(cigar[0], Equal(10));
+/// assert_eq!(cigar[1], Equal(5));
+/// assert_eq!(cigar[2], Ins(5));
+/// assert_eq!(cigar[3], Del(5));
+/// assert_eq!(cigar[4], Diff(1));
+/// assert_eq!(cigar[5], Equal(1));
+/// ```
+pub fn cigar_from_cs(cs: &str) -> PafResult<CigarString> {
+    let bytes = cs.as_bytes();
+    let length = bytes.len();
+    let mut i = 0;
+    let estimated_ops = length / 2;
+    let mut cigar = Vec::with_capacity(estimated_ops);
+    while i < length {
+        let cs_opt = bytes[i];
+        i += 1;
+        match cs_opt {
+            b'=' => {
+                let start = i;
+                while i < length && matches!(bytes[i], b'A' | b'C' | b'G' | b'T' | b'N') {
+                    i += 1;
+                }
+                cigar.push(Cigar::Equal((i - start) as u32));
+            }
+            b':' => {
+                let start = i;
+                while i < length && bytes[i].is_ascii_digit() {
+                    i += 1;
+                }
+                let l = u32::from_str(&cs[start..i]).map_err(|_| Error::ParseIntError {
+                    msg: "Expected integer in cs :N operator".to_string(),
+                })?;
+                cigar.push(Cigar::Equal(l));
+            }
+            b'*' => {
+                i += 2;
+                cigar.push(Cigar::Diff(1));
+            }
+            b'+' => {
+                let start = i;
+                while i < length && bytes[i].is_ascii_lowercase() {
+                    i += 1;
+                }
+                cigar.push(Cigar::Ins((i - start) as u32));
+            }
+            b'-' => {
+                let start = i;
+                while i < length && bytes[i].is_ascii_lowercase() {
+                    i += 1;
+                }
+                cigar.push(Cigar::Del((i - start) as u32));
+            }
+            b'~' => {
+                return Err(Error::PafParseCS {
+                    msg: "Splice operations not yet supported.".to_string(),
+                });
+            }
+            _ => {
+                return Err(Error::PafParseCS {
+                    msg: format!("Unexpected operator in the cs string: {}", cs_opt as char),
+                });
+            }
+        }
+    }
+    Ok(CigarString(cigar))
 }

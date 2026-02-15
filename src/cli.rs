@@ -113,7 +113,7 @@ pub enum Commands {
         #[clap(short, long)]
         largest: bool,
     },
-    /// Trim PAF records that overlap in query sequence to find and optimal splitting point using dynamic programing.
+    /// Trim PAF records that overlap in query sequence to find an optimal splitting point using dynamic programming.
     ///
     /// Note, this can be combined with `rb invert` to also trim the target sequence.
     ///

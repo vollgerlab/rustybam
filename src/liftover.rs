@@ -36,7 +36,10 @@ pub fn trim_paf_rec_to_rgn_fast(rgn: &bed::Region, paf: &PafRecord) -> Option<Pa
     }
 
     let cs_ref = &paf.cs_ops;
-    let mut new_cs_ops: Option<Vec<CsOp>> = cs_ref.as_ref().map(|_| Vec::new());
+    let mut new_cs_ops: Option<CsOps> = cs_ref.as_ref().map(|cd| CsOps {
+        ops: Vec::new(),
+        seq_data: cd.seq_data.clone(),
+    });
 
     let mut t_pos = paf.t_st;
     let mut q_before: u64 = 0;
@@ -59,7 +62,7 @@ pub fn trim_paf_rec_to_rgn_fast(rgn: &bed::Region, paf: &PafRecord) -> Option<Pa
             if started {
                 new_cigar_ops.push(*op);
                 if let (Some(ref mut ncs), Some(ref cs)) = (&mut new_cs_ops, cs_ref) {
-                    ncs.push(cs[ci].clone());
+                    ncs.ops.push(cs.ops[ci]);
                 }
                 if moves_q {
                     q_in += op_len;
@@ -98,7 +101,7 @@ pub fn trim_paf_rec_to_rgn_fast(rgn: &bed::Region, paf: &PafRecord) -> Option<Pa
         new_t_en = overlap_end;
         new_cigar_ops.push(update_cigar_opt_len(op, keep as u32));
         if let (Some(ref mut ncs), Some(ref cs)) = (&mut new_cs_ops, cs_ref) {
-            ncs.push(cs[ci].trim(skip_before as u32, keep as u32));
+            ncs.ops.push(cs.ops[ci].trim(skip_before as u32, keep as u32));
         }
         if moves_q {
             q_in += keep;
@@ -130,7 +133,7 @@ pub fn trim_paf_rec_to_rgn_fast(rgn: &bed::Region, paf: &PafRecord) -> Option<Pa
         }
         new_cigar_ops.remove(0);
         if let Some(ref mut ncs) = new_cs_ops {
-            ncs.remove(0);
+            ncs.ops.remove(0);
         }
     }
     new_t_st += lead_t_adjust;
@@ -153,7 +156,7 @@ pub fn trim_paf_rec_to_rgn_fast(rgn: &bed::Region, paf: &PafRecord) -> Option<Pa
         }
         new_cigar_ops.pop();
         if let Some(ref mut ncs) = new_cs_ops {
-            ncs.pop();
+            ncs.ops.pop();
         }
     }
     new_t_en -= trail_t_adjust;

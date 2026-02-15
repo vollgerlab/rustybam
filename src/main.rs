@@ -48,11 +48,12 @@ pub fn parse_cli() {
         // Run Stats
         //
         Some(Commands::Stats { bam, qbed, paf }) => {
-            bamstats::print_cigar_stats_header(*qbed);
+            let mut sw = bamstats::StatsWriter::new();
+            sw.write_header(*qbed);
             if *paf {
                 for paf in paf::Paf::from_file(bam).records {
                     let stats = bamstats::stats_from_paf(paf);
-                    bamstats::print_cigar_stats(stats, *qbed);
+                    sw.write_stats(&stats, *qbed);
                 }
                 return;
             }
@@ -72,7 +73,7 @@ pub fn parse_cli() {
                 let rec = rec.unwrap();
                 if !rec.is_unmapped() {
                     let stats = bamstats::cigar_stats(rec, &bam_header);
-                    bamstats::print_cigar_stats(stats, *qbed);
+                    sw.write_stats(&stats, *qbed);
                 }
             }
         }
@@ -175,9 +176,10 @@ pub fn parse_cli() {
         //
         Some(Commands::Invert { paf }) => {
             let paf = paf::Paf::from_file(paf);
+            let mut w = paf::PafWriter::new();
             for rec in &paf.records {
                 let inv_rec = paf_swap_query_and_target(rec);
-                println!("{}", inv_rec);
+                w.write_rec(&inv_rec);
             }
         }
         //
@@ -197,6 +199,7 @@ pub fn parse_cli() {
             let new_recs = liftover::trim_paf_by_rgns(&rgns, &paf.records, *qbed);
 
             // if largest set report only the largest alignment for the record
+            let mut w = paf::PafWriter::new();
             if *largest {
                 for (_key, group) in &new_recs
                     .into_iter()
@@ -204,11 +207,11 @@ pub fn parse_cli() {
                     .group_by(|paf_rec| paf_rec.id.clone())
                 {
                     let largest_rec = group.max_by_key(|p| (p.t_en - p.t_st)).unwrap();
-                    println!("{}", largest_rec);
+                    w.write_rec(&largest_rec);
                 }
             } else {
                 for rec in new_recs {
-                    println!("{}", rec);
+                    w.write_rec(&rec);
                 }
             }
         }
@@ -224,8 +227,9 @@ pub fn parse_cli() {
         }) => {
             let mut paf = paf::Paf::from_file(paf);
             paf.overlapping_paf_recs(*match_score, *diff_score, *indel_score, *remove_contained);
+            let mut w = paf::PafWriter::new();
             for rec in &paf.records {
-                println!("{}", rec);
+                w.write_rec(rec);
             }
         }
         //
@@ -243,8 +247,9 @@ pub fn parse_cli() {
             paf.filter_aln_len(*aln);
             paf.filter_aln_pairs(*paired_len);
             log::info!("{} PAF records AFTER filtering.", paf.records.len());
-            for rec in paf.records {
-                println!("{}", rec);
+            let mut w = paf::PafWriter::new();
+            for rec in &paf.records {
+                w.write_rec(rec);
             }
         }
         //
@@ -261,8 +266,9 @@ pub fn parse_cli() {
             if *scaffold {
                 paf.scaffold(*insert);
             }
+            let mut w = paf::PafWriter::new();
             for rec in &paf.records {
-                println!("{}", rec);
+                w.write_rec(rec);
             }
         }
         //
@@ -271,10 +277,11 @@ pub fn parse_cli() {
         Some(Commands::BreakPaf { paf, max_size }) => {
             // read in the file
             let paf = paf::Paf::from_file(paf);
+            let mut w = paf::PafWriter::new();
             for paf_rec in &paf.records {
                 let pafs = liftover::break_paf_on_indels(paf_rec, *max_size);
                 for trimed_paf in pafs {
-                    println!("{}", trimed_paf);
+                    w.write_rec(&trimed_paf);
                 }
             }
         }

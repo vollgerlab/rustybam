@@ -236,11 +236,8 @@ rb get-fasta --name --strand --bed {regions.of.interest.bed} --fasta {seq.fa(.gz
 - `paf-to-sam`: All alignments are marked as primary in the output SAM.
 - `stats --paf`: Requires PAF files generated with minimap2 `-c --eqx` flags.
 - `trim-paf`: Loads the full PAF file into memory; for very large whole-genome alignments, consider splitting by chromosome first.
-- CIGAR operations use the `=/X` extended format; the `cs` tag is not yet supported (see [#3](https://github.com/vollgerlab/rustybam/issues/3)).
-
 ## TODO
 
-- [ ] Add `cs` tag support
 - [ ] Streaming `trim-paf` to reduce memory usage
 - [ ] Allow multiple input files in `bed-length`
 - [ ] Add `D4` support for `nucfreq`

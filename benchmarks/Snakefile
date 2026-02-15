@@ -1,0 +1,534 @@
+#!/usr/bin/env snakemake
+"""
+Benchmark and profile all rustybam (rb) subcommands.
+
+Usage:
+    snakemake -j8 --resources bench_slot=1 -s Snakefile          # run everything
+    snakemake -j8 --resources bench_slot=1 -s Snakefile bench    # just benchmarks
+    snakemake -j8 -s Snakefile profile    # just the profiles
+    snakemake -j8 -s Snakefile summary    # collect results into summary table
+
+Prerequisites:
+    - rb binary: cargo build --release in ../
+    - hyperfine: brew install hyperfine
+    - paftools.js: conda install -c bioconda minimap2
+    - Input PAFs in input-pafs/
+"""
+import json
+import platform
+from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+SCRIPT_DIR = Path(workflow.basedir).resolve()
+PROJ_DIR = (SCRIPT_DIR / "..").resolve()
+CARGO_MANIFEST = str(PROJ_DIR / "Cargo.toml")
+RB = str(PROJ_DIR / "target" / "release" / "rb")
+RB_PROFILE = str(PROJ_DIR / "target" / "profiling" / "rb")
+INPUT_DIR = str(SCRIPT_DIR / "input-pafs")
+
+# Use relative paths for snakemake outputs (avoids issues with spaces in paths)
+RESULTS = "results"
+
+# Source compressed PAF (checked into repo)
+PAF_GZ = f"{INPUT_DIR}/T2Tv2.0-to-GRCh38.no.eqx.gt50k.paf.gz"
+
+# Derived PAF paths (used in shell command strings; DAG deps use rules.*.output)
+FULL_PAF = f"{RESULTS}/T2Tv2.0-to-GRCh38.no.eqx.gt50k.paf"
+PAF_20X = f"{RESULTS}/T2Tv2.0-to-GRCh38.no.eqx.gt50k.20x.paf"
+BED = f"{RESULTS}/liftover_regions.bed"
+
+WARMUP = 2
+RUNS = 5
+PROFILE_DURATION = 10  # seconds for macOS `sample`
+
+# Break-paf thresholds to test
+BREAK_THRESHOLDS = [1000, 5000]
+
+# ---------------------------------------------------------------------------
+# Benchmark definitions
+# Each entry: (name, hyperfine_args)
+#   - Uses shell quoting via single quotes around paths with spaces
+#   - All PAF subcommands that read from stdin use < redirection
+# ---------------------------------------------------------------------------
+def q(path):
+    """Quote a path for shell use inside hyperfine commands."""
+    return f"'{path}'"
+
+
+# rb command prefix: single-threaded for deterministic benchmarking
+RB_CMD = f"{q(RB)} -t 1"
+
+# Individual rb subcommand benchmarks
+# All use PAF_20X (29,200 records, ~1.3GB) for >1s runtime to minimize
+# startup overhead, except trim_paf which uses FULL_PAF (1,460 records)
+# because its O(n²) per-contig algorithm is already slow enough.
+RB_BENCHMARKS = {
+    "trim_paf": f"{RB_CMD} trim-paf < {q(FULL_PAF)} > /dev/null",
+    "orient": f"{RB_CMD} orient < {q(PAF_20X)} > /dev/null",
+    "filter": f"{RB_CMD} filter --paired-len 100000 < {q(PAF_20X)} > /dev/null",
+    "invert": f"{RB_CMD} invert < {q(PAF_20X)} > /dev/null",
+}
+
+# Add break-paf at each threshold
+for t in BREAK_THRESHOLDS:
+    RB_BENCHMARKS[f"break_paf_m{t}"] = (
+        f"{RB_CMD} break-paf -m {t} < {q(PAF_20X)} > /dev/null"
+    )
+
+# Comparison benchmarks: rb vs paftools.js
+COMPARISON_BENCHMARKS = {
+    "stats_comparison": {
+        "rb_stats": f"{RB_CMD} stats --paf < {q(FULL_PAF)} > /dev/null",
+        "paftools_stat": f"paftools.js stat {q(FULL_PAF)} > /dev/null",
+    },
+    "stats_comparison_20x": {
+        "rb_stats_20x": f"{RB_CMD} stats --paf < {q(PAF_20X)} > /dev/null",
+        "paftools_stat_20x": f"paftools.js stat {q(PAF_20X)} > /dev/null",
+    },
+    "liftover_comparison": {
+        "rb_liftover": f"{RB_CMD} liftover --bed {q(BED)} {q(FULL_PAF)} > /dev/null",
+        "paftools_liftover": f"paftools.js liftover {q(FULL_PAF)} {q(BED)} > /dev/null",
+    },
+}
+
+# rb command prefix for profiling: uses the profiling binary (with debug symbols)
+RB_PROF_CMD = f"{q(RB_PROFILE)} -t 1"
+
+# Commands suitable for profiling (long enough to get meaningful samples)
+# All use PAF_20X (29,200 records, ~1.3GB) for >1s runtime and 500+ samples,
+# except trim_paf which uses FULL_PAF (O(n²) per-contig gives ~2-10s).
+PROFILE_COMMANDS = {
+    "trim_paf": f"{RB_PROF_CMD} trim-paf < {q(FULL_PAF)} > /dev/null",
+    "orient": f"{RB_PROF_CMD} orient < {q(PAF_20X)} > /dev/null",
+    "filter": f"{RB_PROF_CMD} filter --paired-len 100000 < {q(PAF_20X)} > /dev/null",
+    "break_paf_m5000": f"{RB_PROF_CMD} break-paf -m 5000 < {q(PAF_20X)} > /dev/null",
+    "stats_paf": f"{RB_PROF_CMD} stats --paf < {q(PAF_20X)} > /dev/null",
+    "liftover": f"{RB_PROF_CMD} liftover --bed {q(BED)} {q(PAF_20X)} > /dev/null",
+    "invert": f"{RB_PROF_CMD} invert < {q(PAF_20X)} > /dev/null",
+}
+
+# For samply profiling: rb args and stdin file separated so samply runs rb
+# directly (macOS codesigning blocks samply from profiling system bash).
+SAMPLY_DEFS = {
+    "trim_paf":        {"args": "-t 1 trim-paf", "stdin": FULL_PAF},
+    "orient":          {"args": "-t 1 orient", "stdin": PAF_20X},
+    "filter":          {"args": "-t 1 filter --paired-len 100000", "stdin": PAF_20X},
+    "break_paf_m5000": {"args": "-t 1 break-paf -m 5000", "stdin": PAF_20X},
+    "stats_paf":       {"args": "-t 1 stats --paf", "stdin": PAF_20X},
+    "liftover":        {"args": f"-t 1 liftover --bed {BED} {PAF_20X}", "stdin": ""},
+    "invert":          {"args": "-t 1 invert", "stdin": PAF_20X},
+}
+
+
+# ---------------------------------------------------------------------------
+# Rules
+# ---------------------------------------------------------------------------
+ALL_BENCH_JSONS = (
+    expand(f"{RESULTS}/bench_{{name}}.json", name=RB_BENCHMARKS.keys())
+    + expand(f"{RESULTS}/bench_{{name}}.json", name=COMPARISON_BENCHMARKS.keys())
+)
+
+ALL_PROFILES = expand(
+    f"{RESULTS}/profile_{{name}}.txt", name=PROFILE_COMMANDS.keys()
+)
+
+ALL_SAMPLY = expand(
+    f"{RESULTS}/samply_{{name}}.json.gz", name=SAMPLY_DEFS.keys()
+)
+
+
+rule all:
+    input:
+        ALL_BENCH_JSONS,
+        ALL_PROFILES,
+        ALL_SAMPLY,
+        f"{RESULTS}/summary.tsv",
+
+
+rule bench:
+    """Just run all hyperfine benchmarks."""
+    input:
+        ALL_BENCH_JSONS,
+
+
+rule samply:
+    """Just run all samply flamegraph profiles."""
+    input:
+        ALL_SAMPLY,
+
+
+rule profile:
+    """Run all profiles (sample text + samply flamegraphs)."""
+    input:
+        ALL_PROFILES,
+        ALL_SAMPLY,
+
+
+rule summary:
+    """Just build the summary table."""
+    input:
+        f"{RESULTS}/summary.tsv",
+
+
+# ---------------------------------------------------------------------------
+# Derive input PAFs from compressed source
+# ---------------------------------------------------------------------------
+rule decompress_paf:
+    """Decompress the source PAF from bgzip."""
+    input:
+        gz=PAF_GZ,
+    output:
+        paf=temp(FULL_PAF),
+    shell:
+        "bgzip -dc '{input.gz}' > '{output.paf}'"
+
+
+rule make_20x_paf:
+    """Concatenate the full PAF 20x for large-input benchmarks."""
+    input:
+        paf=rules.decompress_paf.output.paf,
+    output:
+        paf=temp(PAF_20X),
+    shell:
+        "for i in $(seq 1 20); do cat '{input.paf}'; done > '{output.paf}'"
+
+
+rule make_liftover_bed:
+    """Generate BED regions for liftover benchmarking from PAF target coordinates."""
+    input:
+        paf=rules.decompress_paf.output.paf,
+    output:
+        bed=temp(f"{RESULTS}/liftover_regions.bed"),
+    run:
+        # Extract unique 200kb windows from PAF target coordinates
+        WINDOW = 200_000
+        windows = set()
+        with open(input.paf) as f:
+            for line in f:
+                cols = line.split('\t')
+                chrom, chrom_len = cols[5], int(cols[6])
+                start, end = int(cols[7]), int(cols[8])
+                w_start = (start // WINDOW) * WINDOW
+                while w_start < end:
+                    windows.add((chrom, w_start, min(w_start + WINDOW, chrom_len)))
+                    w_start += WINDOW
+        with open(output.bed, 'w') as f:
+            for chrom, s, e in sorted(windows):
+                f.write(f"{chrom}\t{s}\t{e}\n")
+
+
+# Collect rule outputs for use as inputs in downstream rules
+ALL_DERIVED_PAFS = [
+    rules.decompress_paf.output.paf,
+    rules.make_20x_paf.output.paf,
+]
+
+
+# ---------------------------------------------------------------------------
+# Build rb binary: release (benchmarks) and profile (debug symbols for samply)
+# ---------------------------------------------------------------------------
+rule build_release:
+    """Build rb in release mode (no debug symbols) for benchmarking."""
+    output:
+        stamp=temp(f"{RESULTS}/.build_release.stamp"),
+    params:
+        manifest=CARGO_MANIFEST,
+    shell:
+        """
+        cargo build --release --manifest-path '{params.manifest}' 2>&1
+        touch '{output.stamp}'
+        """
+
+
+rule build_profile:
+    """Build rb with 'profiling' Cargo profile (release + debug symbols).
+    Outputs to target/profiling/ so it doesn't conflict with target/release/."""
+    output:
+        stamp=temp(f"{RESULTS}/.build_profile.stamp"),
+    params:
+        manifest=CARGO_MANIFEST,
+    shell:
+        """
+        cargo build --profile profiling --manifest-path '{params.manifest}' 2>&1
+        touch '{output.stamp}'
+        """
+
+
+# ---------------------------------------------------------------------------
+# Hyperfine benchmarks for individual rb subcommands
+# ---------------------------------------------------------------------------
+rule bench_rb:
+    """Benchmark a single rb subcommand with hyperfine."""
+    input:
+        pafs=ALL_DERIVED_PAFS,
+        build=rules.build_release.output.stamp,
+    output:
+        json=temp(f"{RESULTS}/bench_{{name}}.json"),
+    wildcard_constraints:
+        name="|".join(RB_BENCHMARKS.keys()),
+    resources:
+        bench_slot=1,
+    params:
+        cmd=lambda wc: RB_BENCHMARKS[wc.name],
+        warmup=WARMUP,
+        runs=RUNS,
+    shell:
+        """
+        hyperfine --warmup {params.warmup} --runs {params.runs} \
+            --export-json {output.json} \
+            {params.cmd:q}
+        """
+
+
+# ---------------------------------------------------------------------------
+# Hyperfine comparison benchmarks (rb vs paftools.js)
+# ---------------------------------------------------------------------------
+rule bench_comparison:
+    """Benchmark rb vs paftools.js with hyperfine."""
+    input:
+        pafs=ALL_DERIVED_PAFS,
+        bed=rules.make_liftover_bed.output.bed,
+        build=rules.build_release.output.stamp,
+    output:
+        json=temp(f"{RESULTS}/bench_{{name}}.json"),
+    wildcard_constraints:
+        name="|".join(COMPARISON_BENCHMARKS.keys()),
+    resources:
+        bench_slot=1,
+    params:
+        args=lambda wc: " ".join(
+            f"-n {name!r} {cmd!r}"
+            for name, cmd in COMPARISON_BENCHMARKS[wc.name].items()
+        ),
+        warmup=WARMUP,
+        runs=RUNS,
+    shell:
+        """
+        hyperfine --warmup {params.warmup} --runs {params.runs} \
+            --export-json {output.json} \
+            {params.args}
+        """
+
+
+# ---------------------------------------------------------------------------
+# Profiling with macOS `sample` command
+# ---------------------------------------------------------------------------
+rule profile_command:
+    """Profile an rb subcommand with macOS `sample` for call-graph analysis."""
+    input:
+        pafs=ALL_DERIVED_PAFS,
+        build=rules.build_profile.output.stamp,
+    output:
+        txt=temp(f"{RESULTS}/profile_{{name}}.txt"),
+    wildcard_constraints:
+        name="|".join(PROFILE_COMMANDS.keys()),
+    params:
+        cmd=lambda wc: PROFILE_COMMANDS[wc.name],
+        duration=PROFILE_DURATION,
+    shell:
+        """
+        # Run the command in the background and find the rb PID
+        eval {params.cmd:q} &
+        SHELL_PID=$!
+
+        # Give it a moment to start, then find the actual rb process
+        sleep 0.1
+        RB_PID=$(pgrep -P $SHELL_PID rb 2>/dev/null || echo "$SHELL_PID")
+        # If pgrep didn't find a child, try finding rb by name
+        if [ "$RB_PID" = "$SHELL_PID" ]; then
+            RB_PID=$(pgrep -n "^rb$" 2>/dev/null || echo "$SHELL_PID")
+        fi
+
+        # Sample for the configured duration (or until process exits)
+        if kill -0 $RB_PID 2>/dev/null; then
+            sample $RB_PID {params.duration} -f '{output.txt}' 2>/dev/null || true
+        fi
+
+        # Wait for the process to finish
+        wait $SHELL_PID 2>/dev/null || true
+
+        # If the process was too fast for sample, note that in the output
+        if [ ! -s '{output.txt}' ]; then
+            echo "Process completed before profiling could start." > '{output.txt}'
+            echo "Consider using a larger input for this subcommand." >> '{output.txt}'
+        fi
+        """
+
+
+# ---------------------------------------------------------------------------
+# Profiling with samply (interactive flamegraphs)
+# Runs rb directly (not via bash -c) since macOS codesigning blocks samply
+# from profiling system binaries. Shell redirections are inherited by rb.
+# ---------------------------------------------------------------------------
+rule profile_samply:
+    """Profile an rb subcommand with samply for interactive flamegraph analysis."""
+    input:
+        pafs=ALL_DERIVED_PAFS,
+        build=rules.build_profile.output.stamp,
+    output:
+        json=temp(f"{RESULTS}/samply_{{name}}.json.gz"),
+    wildcard_constraints:
+        name="|".join(SAMPLY_DEFS.keys()),
+    params:
+        rb=RB_PROFILE,
+        args=lambda wc: SAMPLY_DEFS[wc.name]["args"],
+        stdin=lambda wc: SAMPLY_DEFS[wc.name]["stdin"],
+    shell:
+        """
+        if [ -n '{params.stdin}' ]; then
+            samply record --save-only -o '{output.json}' --rate 1000 \
+                -- '{params.rb}' {params.args} < '{params.stdin}' > /dev/null
+        else
+            samply record --save-only -o '{output.json}' --rate 1000 \
+                -- '{params.rb}' {params.args} > /dev/null
+        fi
+        """
+
+
+# ---------------------------------------------------------------------------
+# Collect results into summary table
+# ---------------------------------------------------------------------------
+rule collect_summary:
+    """Parse all hyperfine JSON files into a TSV and markdown summary."""
+    input:
+        jsons=ALL_BENCH_JSONS,
+        full_paf=rules.decompress_paf.output.paf,
+        paf_20x=rules.make_20x_paf.output.paf,
+        bed=rules.make_liftover_bed.output.bed,
+    output:
+        tsv=f"{RESULTS}/summary.tsv",
+        md=f"{RESULTS}/summary.md",
+    run:
+        import os
+
+        # Count input records and sizes for annotation
+        def count_lines(path):
+            with open(path) as f:
+                return sum(1 for _ in f)
+
+        def file_size_mb(path):
+            return os.path.getsize(path) / 1_000_000
+
+        n_full = count_lines(input.full_paf)
+        n_20x = count_lines(input.paf_20x)
+        n_bed = count_lines(input.bed)
+        sz_full = file_size_mb(input.full_paf)
+        sz_20x = file_size_mb(input.paf_20x)
+
+        rows = []
+        for json_path in input.jsons:
+            bench_name = Path(json_path).stem.replace("bench_", "")
+            with open(json_path) as f:
+                data = json.load(f)
+            for result in data["results"]:
+                label = bench_name
+                if len(data["results"]) > 1:
+                    idx = data["results"].index(result)
+                    if bench_name == "stats_comparison":
+                        label = ["rb_stats", "paftools_stat"][idx]
+                    elif bench_name == "stats_comparison_20x":
+                        label = ["rb_stats_20x", "paftools_stat_20x"][idx]
+                    elif bench_name == "liftover_comparison":
+                        label = ["rb_liftover", "paftools_liftover"][idx]
+                    else:
+                        label = f"{bench_name}_{idx}"
+
+                rows.append({
+                    "benchmark": label,
+                    "mean": result["mean"],
+                    "stddev": result["stddev"],
+                    "median": result["median"],
+                    "min": result["min"],
+                    "max": result["max"],
+                    "user": result["user"],
+                    "system": result["system"],
+                    "runs": len(result["times"]),
+                })
+
+        rows.sort(key=lambda r: r["benchmark"])
+
+        # Write TSV
+        if rows:
+            header = ["benchmark", "mean_s", "stddev_s", "median_s",
+                      "min_s", "max_s", "user_s", "system_s", "runs"]
+            with open(output.tsv, "w") as f:
+                f.write("\t".join(header) + "\n")
+                for row in rows:
+                    vals = [row["benchmark"],
+                            f"{row['mean']:.4f}", f"{row['stddev']:.4f}",
+                            f"{row['median']:.4f}", f"{row['min']:.4f}",
+                            f"{row['max']:.4f}", f"{row['user']:.4f}",
+                            f"{row['system']:.4f}", str(row["runs"])]
+                    f.write("\t".join(vals) + "\n")
+
+        # Build markdown summary with two tables
+        by_name = {r["benchmark"]: r for r in rows}
+
+        # Input description notes per benchmark
+        bench_notes = {
+            "trim_paf": f"{n_full:,} records, {sz_full:.0f} MB",
+            "orient": f"{n_20x:,} records",
+            "filter": f"{n_20x:,} records, --paired-len 100000",
+            "invert": f"{n_20x:,} records",
+            "break_paf_m1000": f"{n_20x:,} records, -m 1000",
+            "break_paf_m5000": f"{n_20x:,} records, -m 5000",
+        }
+
+        # Table 1: standalone rb subcommand benchmarks
+        standalone = [r for r in rows
+                      if not r["benchmark"].startswith("paftools")
+                      and not r["benchmark"].startswith("rb_")]
+        standalone.sort(key=lambda r: r["mean"])
+
+        lines = [
+            "## rb subcommand benchmarks", "",
+            "Input: T2Tv2.0-to-GRCh38 whole-genome PAF alignments (minimap2, `--eqx -x asm5`).",
+            f"Default input is the 20x-concatenated PAF ({n_20x:,} records, {sz_20x:.0f} MB) "
+            f"except trim-paf which uses the 1x PAF ({n_full:,} records, {sz_full:.0f} MB).",
+            f"Each benchmark: {WARMUP} warmup + {RUNS} timed runs (hyperfine).",
+            "",
+            "| Command | Input | Mean (s) | +/- s | User (s) | Sys (s) |",
+            "|---|---|---:|---:|---:|---:|",
+        ]
+        for r in standalone:
+            note = bench_notes.get(r["benchmark"], "")
+            lines.append(
+                f"| {r['benchmark']} | {note} "
+                f"| {r['mean']:.3f} | {r['stddev']:.3f} "
+                f"| {r['user']:.3f} | {r['system']:.3f} |")
+
+        # Table 2: rb vs paftools.js comparisons
+        comparisons = [
+            ("stats (1x)", "rb_stats", "paftools_stat",
+             f"{n_full:,} PAF records"),
+            ("stats (20x)", "rb_stats_20x", "paftools_stat_20x",
+             f"{n_20x:,} PAF records"),
+            ("liftover", "rb_liftover", "paftools_liftover",
+             f"{n_full:,} PAF records, {n_bed:,} BED regions"),
+        ]
+
+        lines += [
+            "", "## rb vs paftools.js", "",
+            "| Task | Input | rb (s) | paftools (s) | Ratio | Verdict |",
+            "|---|---|---:|---:|---:|---|",
+        ]
+        for task, rb_key, pt_key, input_note in comparisons:
+            if rb_key in by_name and pt_key in by_name:
+                rb_t = by_name[rb_key]["mean"]
+                pt_t = by_name[pt_key]["mean"]
+                ratio = rb_t / pt_t
+                if ratio < 1:
+                    verdict = f"**rb {1/ratio:.2f}x faster**"
+                else:
+                    verdict = f"rb {ratio:.2f}x slower"
+                lines.append(
+                    f"| {task} | {input_note} | {rb_t:.3f} | {pt_t:.3f} "
+                    f"| {ratio:.2f} | {verdict} |")
+
+        md_text = "\n".join(lines) + "\n"
+        with open(output.md, "w") as f:
+            f.write(md_text)
+
+        print(md_text)

@@ -22,3 +22,8 @@ gh-md-toc
 src/test.rs
 images/**
 .test/aligned.fiberseq.bam
+benchmarks/results/**
+*.snakemake/**
+benchmarks/.snakemake/
+benchmarks/input-pafs/
+

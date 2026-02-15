@@ -536,7 +536,7 @@ fn cs_trim_block1_preserves_cs() {
     let trim = trim_paf_rec_to_rgn_fast(&rgn(0, 3), &paf).unwrap();
     assert_eq!(trim.cigar.to_string(), "3=");
     assert!(trim.cs_ops.is_some());
-    let cs_str: String = trim.cs_ops.unwrap().iter().map(|op| format!("{}", op)).collect();
+    let cs_str: String = trim.cs_ops.unwrap().to_cs_string();
     assert_eq!(cs_str, ":3");
 }
 
@@ -551,7 +551,7 @@ fn cs_trim_span_insertion_preserves_cs() {
     let trim = trim_paf_rec_to_rgn_fast(&rgn(0, 6), &paf).unwrap();
     assert_eq!(trim.cigar.to_string(), "3=2I3=");
     assert!(trim.cs_ops.is_some());
-    let cs_str: String = trim.cs_ops.unwrap().iter().map(|op| format!("{}", op)).collect();
+    let cs_str: String = trim.cs_ops.unwrap().to_cs_string();
     assert_eq!(cs_str, ":3+ga:3");
 }
 
@@ -570,7 +570,7 @@ fn cs_trim_partial_preserves_cs() {
     let trim = trim_paf_rec_to_rgn_fast(&rgn(1, 10), &paf).unwrap();
     assert_eq!(trim.cigar.to_string(), "2=2I3=2D2=");
     assert!(trim.cs_ops.is_some());
-    let cs_str: String = trim.cs_ops.unwrap().iter().map(|op| format!("{}", op)).collect();
+    let cs_str: String = trim.cs_ops.unwrap().to_cs_string();
     assert_eq!(cs_str, ":2+ga:3-cg:2");
 }
 
@@ -616,7 +616,7 @@ fn cs_extended_trim_cuts_matchseq() {
     let trim = trim_paf_rec_to_rgn_fast(&rgn(2, 5), &paf).unwrap();
     assert_eq!(trim.cigar.to_string(), "1=1X1=");
     assert!(trim.cs_ops.is_some());
-    let cs_str: String = trim.cs_ops.unwrap().iter().map(|op| format!("{}", op)).collect();
+    let cs_str: String = trim.cs_ops.unwrap().to_cs_string();
     assert_eq!(cs_str, "=T*ag=A");
 }
 
@@ -631,7 +631,7 @@ fn cs_extended_trim_full_preserves() {
     let paf = cs_extended_paf();
     let trim = trim_paf_rec_to_rgn_fast(&rgn(0, 8), &paf).unwrap();
     assert_eq!(trim.cigar.to_string(), "3=1X4=");
-    let cs_str: String = trim.cs_ops.unwrap().iter().map(|op| format!("{}", op)).collect();
+    let cs_str: String = trim.cs_ops.unwrap().to_cs_string();
     assert_eq!(cs_str, "=ACT*ag=ACGT");
 }
 
@@ -1116,9 +1116,9 @@ fn cs_break_preserves_cs_ops() {
         assert!(rec.cs_ops.is_some(), "cs_ops should be preserved through break-paf");
     }
 
-    let cs1: String = broken[0].cs_ops.as_ref().unwrap().iter().map(|op| format!("{}", op)).collect();
-    let cs2: String = broken[1].cs_ops.as_ref().unwrap().iter().map(|op| format!("{}", op)).collect();
-    let cs3: String = broken[2].cs_ops.as_ref().unwrap().iter().map(|op| format!("{}", op)).collect();
+    let cs1: String = broken[0].cs_ops.as_ref().unwrap().to_cs_string();
+    let cs2: String = broken[1].cs_ops.as_ref().unwrap().to_cs_string();
+    let cs3: String = broken[2].cs_ops.as_ref().unwrap().to_cs_string();
     assert_eq!(cs1, ":3");
     assert_eq!(cs2, ":3");
     assert_eq!(cs3, ":4");

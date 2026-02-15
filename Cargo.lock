@@ -1583,6 +1583,7 @@ dependencies = [
  "flate2",
  "gzp",
  "itertools 0.10.5",
+ "itoa",
  "lazy_static",
  "linear-map",
  "log",
