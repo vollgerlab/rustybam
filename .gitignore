@@ -20,10 +20,8 @@ _site/**
 gh-md-toc
 .jekyll-metadata
 src/test.rs
-images/**
 .test/aligned.fiberseq.bam
 benchmarks/results/**
 *.snakemake/**
 benchmarks/.snakemake/
-benchmarks/input-pafs/
 
