@@ -2,7 +2,7 @@ use super::bed;
 use super::getfasta;
 use super::myio;
 use super::trim_overlap::trim_overlapping_pafs;
-use bio::alphabets::dna::revcomp;
+use bio::alphabets::dna::{complement, revcomp};
 use core::fmt;
 use itertools::Itertools;
 use natord;
@@ -657,15 +657,11 @@ impl PafRecord {
         let mut removed_st_opts = Vec::new();
         while matches!(st_opt, Ins(_) | Del(_)) {
             if matches!(st_opt, Del(_)) {
-                // consumes reference
+                // A deletion consumes only reference bases.
                 remove_st_t += st_opt.len();
-                // TODO learn why I need this
-                remove_st_q += 1;
             } else {
+                // An insertion consumes only query bases.
                 remove_st_q += st_opt.len();
-                // TODO learn why I need this
-                // TODO handle the case when it is a del and then and ins
-                // remove_st_t += 1;
             }
             remove_st_opts += 1;
             removed_st_opts.push(st_opt);
@@ -673,20 +669,6 @@ impl PafRecord {
                 st_opt = self.cigar[remove_st_opts];
             } else {
                 break;
-            }
-        }
-
-        // remove extra counts put in my the case of Del followed by Ins
-        if removed_st_opts.len() > 1 {
-            for i in 0..(removed_st_opts.len() - 1) {
-                let pre_opt = removed_st_opts[i];
-                let cur_opt = removed_st_opts[i + 1];
-                if (matches!(pre_opt, Del(_)) && matches!(cur_opt, Ins(_)))
-                    || (matches!(pre_opt, Ins(_)) && matches!(cur_opt, Del(_)))
-                {
-                    remove_st_t += 1;
-                    remove_st_q -= 1;
-                }
             }
         }
 
@@ -1261,24 +1243,33 @@ pub fn cigar_from_str(text: &str) -> PafResult<CigarString> {
         let n = u32::from_str(&text[i..j]).map_err(|_| Error::PafParseCigar {
             msg: "expected integer".to_owned(),
         })?;
-        let op = &text[j..j + 1];
+        // Return an error if the operator is missing.
+        // Do not panic on trailing digits or on multi-byte characters.
+        let op = match text[j..].chars().next() {
+            Some(c) => c,
+            None => {
+                return Err(Error::PafParseCigar {
+                    msg: format!("missing operator at end of cigar: {}", text),
+                })
+            }
+        };
         inner.push(match op {
-            "M" => Cigar::Match(n),
-            "I" => Cigar::Ins(n),
-            "D" => Cigar::Del(n),
-            "N" => Cigar::RefSkip(n),
-            "H" => Cigar::HardClip(n),
-            "S" => Cigar::SoftClip(n),
-            "P" => Cigar::Pad(n),
-            "=" => Cigar::Equal(n),
-            "X" => Cigar::Diff(n),
+            'M' => Cigar::Match(n),
+            'I' => Cigar::Ins(n),
+            'D' => Cigar::Del(n),
+            'N' => Cigar::RefSkip(n),
+            'H' => Cigar::HardClip(n),
+            'S' => Cigar::SoftClip(n),
+            'P' => Cigar::Pad(n),
+            '=' => Cigar::Equal(n),
+            'X' => Cigar::Diff(n),
             op => {
                 return Err(Error::PafParseCigar {
                     msg: format!("Cannot parse opt: {}", op),
                 })
             }
         });
-        i = j + 1;
+        i = j + op.len_utf8();
     }
     Ok(CigarString(inner))
 }
@@ -1318,7 +1309,7 @@ pub fn paf_swap_query_and_target(paf: &PafRecord) -> PafRecord {
     // flip the cigar
     flipped.cigar = cigar_swap_target_query(&paf.cigar, paf.strand);
 
-    // flip cs_ops: swap Insertion ↔ Deletion
+    // flip cs_ops: swap Insertion ↔ Deletion and swap mismatch bases
     flipped.cs_ops = paf.cs_ops.as_ref().map(|cs| {
         let mut new_ops: Vec<CsOp> = cs
             .ops
@@ -1326,15 +1317,42 @@ pub fn paf_swap_query_and_target(paf: &PafRecord) -> PafRecord {
             .map(|op| match op {
                 CsOp::Insertion(off, len) => CsOp::Deletion(*off, *len),
                 CsOp::Deletion(off, len) => CsOp::Insertion(*off, *len),
+                // The old query base becomes the new reference base.
+                CsOp::Mismatch(r, q) => CsOp::Mismatch(*q, *r),
                 other => *other,
             })
             .collect();
         if paf.strand == '-' {
+            // Walk the ops in the direction of the new target.
             new_ops.reverse();
-        }
-        CsOps {
-            ops: new_ops,
-            seq_data: cs.seq_data.clone(),
+            // The old sequences use the old target orientation.
+            // Reverse-complement them for the new target orientation.
+            let mut new_seq: Vec<u8> = Vec::with_capacity(cs.seq_data.len());
+            for op in new_ops.iter_mut() {
+                match op {
+                    CsOp::MatchSeq(off, len)
+                    | CsOp::Insertion(off, len)
+                    | CsOp::Deletion(off, len) => {
+                        let rc = revcomp(cs.seq(*off, *len));
+                        *off = new_seq.len() as u32;
+                        new_seq.extend_from_slice(&rc);
+                    }
+                    CsOp::Mismatch(r, q) => {
+                        *r = complement(*r);
+                        *q = complement(*q);
+                    }
+                    CsOp::Matches(_) => {}
+                }
+            }
+            CsOps {
+                ops: new_ops,
+                seq_data: new_seq,
+            }
+        } else {
+            CsOps {
+                ops: new_ops,
+                seq_data: cs.seq_data.clone(),
+            }
         }
     });
 
@@ -1536,4 +1554,71 @@ pub fn cigar_from_cs(cs: &str) -> PafResult<CigarString> {
         }
     }
     Ok(CigarString(cigar))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remove_trailing_indels_leading_del() {
+        // A leading deletion consumes only target bases.
+        let mut rec = PafRecord::new("Q 10 0 3 + T 20 0 5 3 5 60 cg:Z:2D3=").unwrap();
+        rec.remove_trailing_indels();
+        assert_eq!(rec.cigar.to_string(), "3=");
+        assert_eq!((rec.q_st, rec.q_en), (0, 3));
+        assert_eq!((rec.t_st, rec.t_en), (2, 5));
+    }
+
+    #[test]
+    fn remove_trailing_indels_leading_del_then_ins() {
+        // A leading Del+Ins pair trims one target base and one query base.
+        let mut rec = PafRecord::new("Q 10 0 4 + T 20 0 4 3 5 60 cg:Z:1D1I3=").unwrap();
+        rec.remove_trailing_indels();
+        assert_eq!(rec.cigar.to_string(), "3=");
+        assert_eq!((rec.q_st, rec.q_en), (1, 4));
+        assert_eq!((rec.t_st, rec.t_en), (1, 4));
+    }
+
+    #[test]
+    fn swap_flips_mismatch_bases() {
+        // After the swap, the old query base is the new reference base.
+        let rec = PafRecord::new("Q 11 0 11 + T 11 0 11 10 11 60 cs:Z::5*at:5").unwrap();
+        let flipped = paf_swap_query_and_target(&rec);
+        assert_eq!(flipped.cs_ops.unwrap().to_cs_string(), ":5*ta:5");
+    }
+
+    #[test]
+    fn swap_minus_strand_revcomps_cs_sequences() {
+        // On the '-' strand, the swap reverses the op order.
+        // It must also reverse-complement each op sequence.
+        let rec = PafRecord::new("Q 10 0 10 - T 13 0 13 9 13 60 cs:Z::3-acg:4*ac:2").unwrap();
+        let mut flipped = paf_swap_query_and_target(&rec);
+        assert_eq!(
+            flipped.cs_ops.as_ref().unwrap().to_cs_string(),
+            ":2*gt:4+cgt:3"
+        );
+        // The flipped record must stay consistent with its cigar.
+        flipped.check_integrity().unwrap();
+    }
+
+    #[test]
+    fn swap_minus_strand_revcomps_insertion_payload() {
+        // An old insertion becomes a deletion with a reverse-complemented sequence.
+        let rec = PafRecord::new("Q 13 0 13 - T 10 0 10 10 13 60 cs:Z::4+acg:6").unwrap();
+        let flipped = paf_swap_query_and_target(&rec);
+        assert_eq!(flipped.cs_ops.unwrap().to_cs_string(), ":6-cgt:4");
+    }
+
+    #[test]
+    fn cigar_from_str_rejects_trailing_digits() {
+        // A cigar that ends in digits has no operator. Return an error.
+        assert!(cigar_from_str("10M5").is_err());
+    }
+
+    #[test]
+    fn cigar_from_str_rejects_multibyte_op() {
+        // A multi-byte character is not a valid operator. Return an error.
+        assert!(cigar_from_str("10é").is_err());
+    }
 }
