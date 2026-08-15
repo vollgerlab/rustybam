@@ -17,3 +17,11 @@ pr-run-mode = "plan"
 install-path = "CARGO_HOME"
 # Whether to install an updater program
 install-updater = true
+# release-plz creates the GitHub Release as a draft; cargo-dist only
+# uploads artifacts to it and un-drafts it.
+create-release = false
+# Trigger this workflow via workflow_dispatch instead of tag-push. The
+# release-plz workflow dispatches it (with the tag) after creating the
+# release. workflow_dispatch is the one event the default GITHUB_TOKEN is
+# allowed to trigger, so this needs no PAT.
+dispatch-releases = true

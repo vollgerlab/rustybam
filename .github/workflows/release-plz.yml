@@ -1,0 +1,70 @@
+name: release-plz
+
+# Rust release automation. Conventional commits on main accumulate into a
+# release PR. Merging that PR publishes to crates.io, pushes the tag, and
+# creates a draft GitHub release. This workflow then dispatches release.yml
+# (cargo-dist), which attaches the binaries and un-drafts the release.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  # Open or update the release PR (version bump + changelog).
+  release-plz-pr:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: release-plz-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0            # release-plz needs full git history
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # On merge of the release PR: publish to crates.io and push the tag.
+  release-plz-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write     # crates.io Trusted Publishing (OIDC)
+      actions: write      # dispatch cargo-dist (release.yml)
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Authenticate to crates.io (Trusted Publishing)
+        id: auth
+        uses: rust-lang/crates-io-auth-action@v1
+      - name: release-plz release
+        id: release-plz
+        uses: release-plz/action@v0.5
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+      # Build binaries, attach them to the draft release, and un-draft it.
+      # Runs only when a release was created.
+      - name: Dispatch cargo-dist
+        if: ${{ steps.release-plz.outputs.releases_created == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASES: ${{ steps.release-plz.outputs.releases }}
+        run: |
+          tag=$(echo "$RELEASES" | jq -r '.[0].tag')
+          if [ -n "$tag" ] && [ "$tag" != "null" ]; then
+            echo "Dispatching cargo-dist for $tag"
+            gh workflow run release.yml --ref main -f tag="$tag"
+          else
+            echo "No tag in release output; skipping cargo-dist"
+          fi
