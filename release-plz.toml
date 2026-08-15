@@ -1,0 +1,17 @@
+# release-plz configuration.
+#
+# Single crate. release-plz opens a release PR, publishes to crates.io,
+# and pushes the tag. It does NOT create the GitHub release: the
+# cargo-dist workflow (release.yml) triggers on the tag push, builds the
+# binaries, and creates the release itself.
+
+[workspace]
+# Open a release PR only for feat or fix commits. Breaking changes use
+# feat! or fix!, which still match.
+release_commits = "^(feat|fix)[(:!]"
+
+[[package]]
+name = "rustybam"
+git_tag_name = "v{{ version }}"          # matches existing tags and cargo-dist
+git_release_enable = false               # cargo-dist owns the GitHub release
+features_always_increment_minor = true   # feat -> minor even on 0.x
