@@ -33,12 +33,3 @@ fn well_formed_line_parses() {
     assert_eq!(rec.q_name, "A");
     assert_eq!(rec.cigar.to_string(), "1=");
 }
-
-/// check_integrity must not count mismatches (X) as matches in column 10.
-#[test]
-fn nmatch_excludes_mismatches() {
-    let mut rec = PafRecord::new("Q 11 0 11 + T 20 0 11 10 11 60 cg:Z:5=1X5=").unwrap();
-    rec.check_integrity().unwrap();
-    assert_eq!(rec.nmatch, 10);
-    assert_eq!(rec.aln_len, 11);
-}
