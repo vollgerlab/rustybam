@@ -33,3 +33,12 @@ fn well_formed_line_parses() {
     assert_eq!(rec.q_name, "A");
     assert_eq!(rec.cigar.to_string(), "1=");
 }
+
+/// Column 10 follows the PAF spec: X ops are not residue matches.
+#[test]
+fn nmatch_follows_paf_spec() {
+    let mut rec = PafRecord::new("q\t10\t0\t10\t+\tt\t10\t0\t10\t10\t10\t60\tcg:Z:4=2X4=").unwrap();
+    rec.check_integrity().unwrap();
+    assert_eq!(rec.nmatch, 8);
+    assert_eq!(rec.aln_len, 10);
+}

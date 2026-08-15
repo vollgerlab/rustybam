@@ -1203,21 +1203,22 @@ pub fn consumes_query(cigar_opt: &Cigar) -> bool {
     )
 }
 
-/// Return true for matched alignment positions (M, X, or =).
-/// This count feeds column 10 after a rewrite. rustybam defines that
-/// column as matched alignment positions, not residue matches: M mixes
-/// matches and mismatches, so the cigar alone cannot separate them, and
-/// X stays included to keep one meaning for every cigar flavor.
+/// Return true when the operation counts toward PAF column 10.
+/// The PAF spec defines column 10 as residue matches, so X does not
+/// count. M can hold matches or mismatches, and the cigar alone cannot
+/// split them, so M counts and plain-M cigars give an upper bound. Use
+/// --eqx cigars for exact counts. Nothing in rustybam or SafFire reads
+/// this column; it only sets column 10 of written records.
 /// # Example
 /// ```
 /// use rustybam::paf;
 /// use rust_htslib::bam::record::Cigar::*;
 /// assert!(paf::is_match(&Match(5)));
-/// assert!(paf::is_match(&Diff(5)));
+/// assert!(!paf::is_match(&Diff(5)));
 /// assert!(paf::is_match(&Equal(5)));
 /// ```
 pub fn is_match(cigar_opt: &Cigar) -> bool {
-    matches!(cigar_opt, Match(_i) | Diff(_i) | Equal(_i))
+    matches!(cigar_opt, Match(_i) | Equal(_i))
 }
 
 /// # Example
