@@ -472,7 +472,11 @@ impl PafRecord {
     /// ```
     pub fn new(line: &str) -> PafResult<PafRecord> {
         let t: Vec<&str> = line.split_ascii_whitespace().collect();
-        assert!(t.len() >= 12); // must have all required columns
+        // A PAF record must have all 12 required columns.
+        // Return an error so callers can skip the bad line.
+        if t.len() < 12 {
+            return Err(Error::ParsePafColumn {});
+        }
 
         // Two-pass tag scanning: first find cs/cg positions (tag order is not
         // guaranteed by the PAF spec), then parse only the preferred one.
@@ -480,11 +484,11 @@ impl PafRecord {
         let mut cs_idx: Option<usize> = None;
         let mut cg_idx: Option<usize> = None;
         for (i, token) in t.iter().enumerate().skip(12) {
-            debug_assert!(
-                token.len() >= 5 && token.as_bytes()[2] == b':' && token.as_bytes()[4] == b':',
-                "Malformed PAF tag: {}",
-                token
-            );
+            // A valid tag has the form "XX:T:value". Reject malformed
+            // tokens so callers can skip the bad line.
+            if token.len() < 5 || token.as_bytes()[2] != b':' || token.as_bytes()[4] != b':' {
+                return Err(Error::ParsePafColumn {});
+            }
             let tag = &token[..2];
             if tag == "cs" {
                 cs_idx = Some(i);
@@ -1199,16 +1203,18 @@ pub fn consumes_query(cigar_opt: &Cigar) -> bool {
     )
 }
 
+/// Return true if the operation counts as a residue match (PAF column 10).
+/// Diff (X) is a mismatch, so it does not count.
 /// # Example
 /// ```
 /// use rustybam::paf;
 /// use rust_htslib::bam::record::Cigar::*;
 /// assert!(paf::is_match(&Match(5)));
-/// assert!(paf::is_match(&Diff(5)));
+/// assert!(!paf::is_match(&Diff(5)));
 /// assert!(paf::is_match(&Equal(5)));
 /// ```
 pub fn is_match(cigar_opt: &Cigar) -> bool {
-    matches!(cigar_opt, Match(_i) | Diff(_i) | Equal(_i))
+    matches!(cigar_opt, Match(_i) | Equal(_i))
 }
 
 /// # Example
