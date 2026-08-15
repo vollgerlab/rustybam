@@ -63,7 +63,12 @@ impl Paf {
             log::trace!("{:?}", line);
             match PafRecord::new(&line.unwrap()) {
                 Ok(mut rec) => {
-                    rec.check_integrity().unwrap();
+                    // A record without a cg or cs tag has an empty cigar.
+                    // Default minimap2 output has no cigar tags.
+                    // Skip the cigar integrity check for these records.
+                    if !rec.cigar.is_empty() {
+                        rec.check_integrity().unwrap();
+                    }
                     paf.records.push(rec);
                 }
                 Err(_) => eprintln!("\nUnable to parse PAF record. Skipping line {}", index + 1),
@@ -763,6 +768,30 @@ impl PafRecord {
         self.check_integrity().unwrap();
     }
 
+    /// Set this record to a consistent zero-length alignment.
+    /// The truncation keeps no aligned bases in this case.
+    /// The cigar, the cs ops, and the coordinates stay in agreement.
+    fn set_empty_alignment(
+        &mut self,
+        t_before: u64,
+        q_consumed_before: u64,
+        new_cs_ops: Option<CsOps>,
+    ) {
+        self.t_st += t_before;
+        self.t_en = self.t_st;
+        if self.strand == '+' {
+            self.q_st += q_consumed_before;
+            self.q_en = self.q_st;
+        } else {
+            self.q_en -= q_consumed_before;
+            self.q_st = self.q_en;
+        }
+        self.cigar = CigarString(Vec::new());
+        self.cs_ops = new_cs_ops;
+        self.nmatch = 0;
+        self.aln_len = 0;
+    }
+
     /// Truncate this record to keep only the portion within [new_q_st, new_q_en)
     /// in query coordinates. Walks compressed CIGAR ops directly — O(n_cigar_ops).
     pub fn truncate_record_by_query(&mut self, new_q_st: u64, new_q_en: u64) {
@@ -869,7 +898,8 @@ impl PafRecord {
         }
 
         if new_cigar_ops.is_empty() {
-            self.cs_ops = new_cs_ops;
+            // The kept interval overlaps no query-consuming ops.
+            self.set_empty_alignment(t_before, q_consumed_before, new_cs_ops);
             return;
         }
 
@@ -914,7 +944,8 @@ impl PafRecord {
         q_consumed_in -= trail_q;
 
         if new_cigar_ops.is_empty() {
-            self.cs_ops = new_cs_ops;
+            // All kept ops were indels. No aligned bases remain.
+            self.set_empty_alignment(t_before, q_consumed_before, new_cs_ops);
             return;
         }
 
@@ -1429,6 +1460,13 @@ pub fn parse_cs_string(cs: &str) -> PafResult<(CigarString, CsOps)> {
                 ops.push(CsOp::Matches(l));
             }
             b'*' => {
+                // A '*' operator needs two bases after it.
+                // Reject a truncated cs string.
+                if i + 1 >= length {
+                    return Err(Error::PafParseCS {
+                        msg: "Truncated '*' operator in cs string: expected two bases.".to_string(),
+                    });
+                }
                 let ref_base = bytes[i];
                 let query_base = bytes[i + 1];
                 i += 2;
@@ -1534,6 +1572,13 @@ pub fn cigar_from_cs(cs: &str) -> PafResult<CigarString> {
                 cigar.push(Cigar::Equal(l));
             }
             b'*' => {
+                // A '*' operator needs two bases after it.
+                // Reject a truncated cs string.
+                if i + 1 >= length {
+                    return Err(Error::PafParseCS {
+                        msg: "Truncated '*' operator in cs string: expected two bases.".to_string(),
+                    });
+                }
                 i += 2;
                 cigar.push(Cigar::Diff(1));
             }
@@ -1630,5 +1675,61 @@ mod tests {
     fn cigar_from_str_rejects_multibyte_op() {
         // A multi-byte character is not a valid operator. Return an error.
         assert!(cigar_from_str("10é").is_err());
+
+        /// A PAF line with no cg tag and no cs tag. This is the default
+        /// minimap2 output format.
+        const NO_TAG_LINE: &str = "Q\t10\t0\t10\t+\tT\t20\t12\t20\t3\t9\t60";
+
+        #[test]
+        fn from_file_accepts_paf_without_cigar_tags() {
+            let path = std::env::temp_dir().join("rustybam_no_cigar_test.paf");
+            std::fs::write(&path, format!("{}\n", NO_TAG_LINE)).unwrap();
+            let paf = Paf::from_file(path.to_str().unwrap());
+            std::fs::remove_file(&path).ok();
+            assert_eq!(paf.records.len(), 1);
+            let rec = &paf.records[0];
+            assert!(rec.cigar.is_empty());
+            assert_eq!(rec.t_st, 12);
+            assert_eq!(rec.t_en, 20);
+        }
+
+        #[test]
+        fn parse_cs_string_truncated_mismatch_is_error() {
+            // A '*' operator must have two bases after it.
+            assert!(parse_cs_string(":5*").is_err());
+            assert!(parse_cs_string(":5*a").is_err());
+            assert!(cigar_from_cs(":5*").is_err());
+            assert!(cigar_from_cs(":5*a").is_err());
+            // A complete '*' operator stays valid.
+            assert!(parse_cs_string(":5*at").is_ok());
+            assert!(cigar_from_cs(":5*at").is_ok());
+        }
+
+        #[test]
+        fn truncate_to_empty_interval_is_consistent() {
+            let mut rec =
+                PafRecord::new("Q\t11\t0\t11\t+\tT\t11\t0\t11\t11\t11\t60\tcs:Z::11").unwrap();
+            rec.truncate_record_by_query(5, 5);
+            assert!(rec.cigar.is_empty());
+            assert_eq!(rec.cs_ops.as_ref().unwrap().ops.len(), 0);
+            assert_eq!(rec.q_st, rec.q_en);
+            assert_eq!(rec.t_st, rec.t_en);
+            assert!(rec.check_integrity().is_ok());
+        }
+
+        #[test]
+        fn truncate_to_indel_only_is_consistent() {
+            // Query layout: 0-5 match, 5-8 insertion, 8-13 match.
+            let mut rec =
+                PafRecord::new("Q\t13\t0\t13\t+\tT\t10\t0\t10\t10\t13\t60\tcs:Z::5+aaa:5").unwrap();
+            // Keep only the insertion. All kept ops are indels.
+            rec.truncate_record_by_query(5, 8);
+            assert!(rec.cigar.is_empty());
+            assert_eq!(rec.cs_ops.as_ref().unwrap().ops.len(), 0);
+            assert_eq!(rec.q_st, rec.q_en);
+            assert_eq!(rec.t_st, rec.t_en);
+            assert_eq!(rec.t_st, 5);
+            assert!(rec.check_integrity().is_ok());
+        }
     }
 }
