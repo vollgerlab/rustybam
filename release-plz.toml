@@ -1,9 +1,10 @@
 # release-plz configuration.
 #
 # Single crate. release-plz opens a release PR, publishes to crates.io,
-# and pushes the tag. It does NOT create the GitHub release: the
-# cargo-dist workflow (release.yml) triggers on the tag push, builds the
-# binaries, and creates the release itself.
+# pushes the tag, and creates a DRAFT GitHub release with the changelog
+# and install instructions. The release-plz workflow then dispatches the
+# cargo-dist workflow (release.yml), which attaches the binaries and
+# un-drafts the release.
 
 [workspace]
 # Open a release PR only for feat or fix commits. Breaking changes use
@@ -13,5 +14,18 @@ release_commits = "^(feat|fix)[(:!]"
 [[package]]
 name = "rustybam"
 git_tag_name = "v{{ version }}"          # matches existing tags and cargo-dist
-git_release_enable = false               # cargo-dist owns the GitHub release
+git_release_draft = true                 # cargo-dist attaches binaries, then un-drafts
 features_always_increment_minor = true   # feat -> minor even on 0.x
+# The release body: an install section above the changelog. The installer
+# asset is rustybam-installer.sh for tag v{{ version }}.
+git_release_body = """
+## Install
+
+Prebuilt binaries are attached below. Quick install (Linux/macOS):
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/vollgerlab/rustybam/releases/download/v{{ version }}/rustybam-installer.sh | sh
+```
+
+{{ changelog }}
+"""
