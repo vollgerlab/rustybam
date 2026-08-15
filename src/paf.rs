@@ -1205,6 +1205,9 @@ pub fn consumes_query(cigar_opt: &Cigar) -> bool {
 
 /// Return true if the operation counts as a residue match (PAF column 10).
 /// Diff (X) is a mismatch, so it does not count.
+/// M positions can hold matches or mismatches. The cigar alone cannot
+/// split them, so M counts as match. For plain-M cigars this makes
+/// nmatch an upper bound. Use --eqx cigars for exact counts.
 /// # Example
 /// ```
 /// use rustybam::paf;
