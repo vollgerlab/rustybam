@@ -55,7 +55,7 @@ num-format = "0.4.4"
 rayon = "1.7"
 niffler = { version = "2.5.0", default-features = false, features = ["gz"] }
 regex = "1.8"
-rust-htslib = "0.44"
+rust-htslib = "0.45"
 bio-io = "0.3"
 snap = { version = "1.1", optional = true }
 itoa = "1"

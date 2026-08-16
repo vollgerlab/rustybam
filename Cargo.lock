@@ -131,7 +131,7 @@ dependencies = [
  "niffler",
  "rayon",
  "regex",
- "rust-htslib",
+ "rust-htslib 0.44.1",
 ]
 
 [[package]]
@@ -1551,6 +1551,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "rust-htslib"
+version = "0.45.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bea99084ac4f6f7caff758be2f0dd4718d3e582a735f75bd5957f9c49f5802f8"
+dependencies = [
+ "bio-types",
+ "byteorder",
+ "custom_derive",
+ "derive-new 0.5.9",
+ "hts-sys",
+ "ieee754",
+ "lazy_static",
+ "libc",
+ "linear-map",
+ "newtype_derive",
+ "regex",
+ "thiserror 1.0.69",
+ "url",
+]
+
+[[package]]
 name = "rustc_version"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1593,7 +1614,7 @@ dependencies = [
  "num-format",
  "rayon",
  "regex",
- "rust-htslib",
+ "rust-htslib 0.45.0",
  "snap",
 ]
 
