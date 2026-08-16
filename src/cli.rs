@@ -276,6 +276,23 @@ pub enum Commands {
         #[clap(short = 'g', long)]
         genome_size: Option<usize>,
     },
+    /// Analyze k-mer content in genomic regions specified by a BED file.
+    ///
+    /// For each unique name in the 4th column of the BED file, counts k-mers
+    /// across all regions with that name and outputs a table with k-mer frequencies.
+    SeqContent {
+        /// Input FASTA file (can be compressed with .gz)
+        #[clap(short, long)]
+        fasta: String,
+
+        /// Input BED file with 4 columns (chr, start, end, name)
+        #[clap(short, long)]
+        bed: String,
+
+        /// K-mer length to analyze (must be <= 7)
+        #[clap(short, long, default_value_t = 3)]
+        kmer_size: usize,
+    },
 }
 
 pub fn make_cli_parse() -> Cli {
