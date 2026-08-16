@@ -29,3 +29,17 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/vollgerlab/rustybam/rel
 
 {{ changelog }}
 """
+
+[changelog]
+# Link each entry to its pull request, or to its commit when no PR is
+# known. release-plz fills commit.remote from the GitHub API in CI.
+body = """
+## [{{ version | trim_start_matches(pat="v") }}]{%- if release_link %}({{ release_link }}){% endif %} - {{ timestamp | date(format="%Y-%m-%d") }}
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | upper_first }}
+{% for commit in commits %}
+- {{ commit.message | split(pat="\n") | first | trim }}\
+{%- if commit.remote.pr_number %} ([#{{ commit.remote.pr_number }}]({{ remote.link }}/pull/{{ commit.remote.pr_number }})){% else %} ([{{ commit.id | truncate(length=7, end="") }}]({{ remote.link }}/commit/{{ commit.id }})){% endif %}
+{%- endfor %}
+{% endfor %}
+"""
