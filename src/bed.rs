@@ -1,5 +1,5 @@
+use crate::myio;
 use bio::io::bed;
-use bio_io;
 use lazy_static::lazy_static;
 use regex::Regex;
 use std::cmp::{max, min};
@@ -171,8 +171,7 @@ pub fn parse_bed_record(record: bed::Record) -> Region {
 /// ```
 pub fn parse_bed(filename: &str) -> Vec<Region> {
     let mut vec = Vec::new();
-    //let reader = myio::reader(filename);
-    let reader = bio_io::buffer_from(filename).expect("unable to open bam file.");
+    let reader = myio::reader(filename);
     let mut records = bed::Reader::new(reader);
     let mut rec_num = 0;
     for (idx, rec) in records.records().enumerate() {
