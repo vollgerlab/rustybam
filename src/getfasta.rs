@@ -5,8 +5,9 @@ use rust_htslib::faidx;
 use std::str;
 
 pub fn fetch_fasta(reader: &faidx::Reader, chrom: &str, start: usize, end: usize) -> Vec<u8> {
-    let seq = reader.fetch_seq(chrom, start, end).unwrap().to_owned();
-    seq
+    // rust-htslib 1.0 fetch_seq returns an owned Vec and frees the
+    // htslib buffer itself. No leak, no to_owned copy.
+    reader.fetch_seq(chrom, start, end).unwrap()
 }
 /// # Example
 /// ```
