@@ -9,6 +9,7 @@ use rust_htslib::faidx;
 use rustybam::cli::Commands;
 use rustybam::fastx;
 use rustybam::paf::paf_swap_query_and_target;
+use rustybam::seq_content;
 use rustybam::*;
 use std::time::Instant;
 
@@ -333,6 +334,23 @@ pub fn parse_cli() {
             name,
         }) => {
             getfasta::get_fasta(fasta, bed, *name, *strand);
+        }
+        //
+        // Run SeqContent
+        //
+        Some(Commands::SeqContent {
+            fasta,
+            bed,
+            kmer_size,
+        }) => {
+            if *kmer_size == 0 || *kmer_size > 7 {
+                eprintln!("Error: k-mer size must be 1-7, got {}", kmer_size);
+                std::process::exit(1);
+            }
+            if let Err(e) = seq_content::run_seq_content(fasta, bed, *kmer_size) {
+                eprintln!("Error running seq-content: {}", e);
+                std::process::exit(1);
+            }
         }
         //
         // no command opt
